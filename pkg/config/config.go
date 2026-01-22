@@ -249,6 +249,8 @@ type LoadOptions struct {
 	ConfigContent []byte
 	// EnvFile is path to .env file
 	EnvFile string
+	// DisableExit disables automatic exit on --help or parse errors (for config reload)
+	DisableExit bool
 }
 
 // LoadGlobalConfig loads configuration with priority: CLI flags (defaults) < YAML < env vars
@@ -257,11 +259,17 @@ func LoadGlobalConfig(opts LoadOptions) (*GlobalConfig, error) {
 	cfg := &GlobalConfig{}
 
 	// Step 1: Parse CLI args with kong (applies defaults)
-	parser, err := kong.New(cfg,
+	kongOpts := []kong.Option{
 		kong.Name("sealos-state-metric"),
 		kong.Description("Sealos state metrics collector for Kubernetes"),
-		kong.Exit(func(int) {}), // Don't exit on parse error
-	)
+	}
+
+	// Only disable exit during config reload
+	if opts.DisableExit {
+		kongOpts = append(kongOpts, kong.Exit(func(int) {}))
+	}
+
+	parser, err := kong.New(cfg, kongOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create config parser: %w", err)
 	}

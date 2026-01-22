@@ -98,6 +98,7 @@ func handleReload(cliArgs []string, newConfigContent []byte, server *app.Server)
 	newConfig, err := config.LoadGlobalConfig(config.LoadOptions{
 		Args:          cliArgs,
 		ConfigContent: newConfigContent,
+		DisableExit:   true, // Don't exit during reload
 	})
 	if err != nil {
 		return err
