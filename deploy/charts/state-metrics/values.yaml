@@ -1,4 +1,4 @@
-# Default values for sealos-state-metric
+# Default values for state-metrics
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
@@ -7,7 +7,7 @@ replicaCount: 1
 
 # Container image configuration
 image:
-  repository: ghcr.io/labring/sealos-state-metric
+  repository: ghcr.io/labring/state-metrics
   pullPolicy: IfNotPresent
   tag: ""  # Overrides the image tag whose default is the chart appVersion
 
@@ -152,7 +152,7 @@ config:
     # Namespace for leader election lease (empty disables leader election)
     namespace: ""  # defaults to release namespace
     # Name of the leader election lease
-    leaseName: "sealos-state-metric"
+    leaseName: "state-metrics"
     # Leader election lease duration
     leaseDuration: "15s"
     # Leader election renew deadline

@@ -1,4 +1,4 @@
-# sealos-state-metric Helm Chart
+# state-metrics Helm Chart
 
 Kubernetes state metrics collector for Sealos monitoring.
 
@@ -10,22 +10,22 @@ Kubernetes state metrics collector for Sealos monitoring.
 
 ## Installing the Chart
 
-To install the chart with the release name `sealos-state-metric`:
+To install the chart with the release name `state-metrics`:
 
 ```bash
-helm install sealos-state-metric ./deploy/charts/sealos-state-metric
+helm install state-metrics ./deploy/charts/state-metrics
 ```
 
 To install in a specific namespace:
 
 ```bash
-helm install sealos-state-metric ./deploy/charts/sealos-state-metric -n sealos-system --create-namespace
+helm install state-metrics ./deploy/charts/state-metrics -n sealos-system --create-namespace
 ```
 
 ## Uninstalling the Chart
 
 ```bash
-helm uninstall sealos-state-metric
+helm uninstall state-metrics
 ```
 
 ## Configuration
@@ -37,7 +37,7 @@ The following table lists the configurable parameters of the chart and their def
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `replicaCount` | Number of replicas | `1` |
-| `image.repository` | Image repository | `ghcr.io/labring/sealos-state-metric` |
+| `image.repository` | Image repository | `ghcr.io/labring/state-metrics` |
 | `image.tag` | Image tag | `""` (uses appVersion) |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 
@@ -88,7 +88,7 @@ The following table lists the configurable parameters of the chart and their def
 |-----------|-------------|---------|
 | `config.leaderElection.enabled` | Enable leader election | `true` |
 | `config.leaderElection.namespace` | Leader election namespace | `""` (uses release namespace) |
-| `config.leaderElection.leaseName` | Lease name | `sealos-state-metric` |
+| `config.leaderElection.leaseName` | Lease name | `state-metrics` |
 | `config.leaderElection.leaseDuration` | Lease duration | `15s` |
 | `config.leaderElection.renewDeadline` | Renew deadline | `10s` |
 | `config.leaderElection.retryPeriod` | Retry period | `2s` |
@@ -181,7 +181,7 @@ resources:
 Install with custom values:
 
 ```bash
-helm install sealos-state-metric ./deploy/charts/sealos-state-metric -f values-custom.yaml
+helm install state-metrics ./deploy/charts/state-metrics -f values-custom.yaml
 ```
 
 ## Metrics
@@ -199,25 +199,25 @@ The following metrics are exposed:
 ### Check pod status
 
 ```bash
-kubectl get pods -l app.kubernetes.io/name=sealos-state-metric
+kubectl get pods -l app.kubernetes.io/name=state-metrics
 ```
 
 ### View logs
 
 ```bash
-kubectl logs -l app.kubernetes.io/name=sealos-state-metric -f
+kubectl logs -l app.kubernetes.io/name=state-metrics -f
 ```
 
 ### Test metrics endpoint
 
 ```bash
-kubectl port-forward svc/sealos-state-metric 9090:9090
+kubectl port-forward svc/state-metrics 9090:9090
 curl http://localhost:9090/metrics
 ```
 
 ### Verify RBAC permissions
 
 ```bash
-kubectl auth can-i get nodes --as=system:serviceaccount:default:sealos-state-metric
-kubectl auth can-i get pods --as=system:serviceaccount:default:sealos-state-metric
+kubectl auth can-i get nodes --as=system:serviceaccount:default:state-metrics
+kubectl auth can-i get pods --as=system:serviceaccount:default:state-metrics
 ```

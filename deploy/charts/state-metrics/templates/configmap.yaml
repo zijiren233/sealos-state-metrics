@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "sealos-state-metric.fullname" . }}
+  name: {{ include "state-metrics.fullname" . }}
   labels:
-    {{- include "sealos-state-metric.labels" . | nindent 4 }}
+    {{- include "state-metrics.labels" . | nindent 4 }}
 data:
   # Logging configuration
   LOGGING_LEVEL: {{ .Values.config.logLevel | quote }}

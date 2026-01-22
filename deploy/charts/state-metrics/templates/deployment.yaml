@@ -1,14 +1,14 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "sealos-state-metric.fullname" . }}
+  name: {{ include "state-metrics.fullname" . }}
   labels:
-    {{- include "sealos-state-metric.labels" . | nindent 4 }}
+    {{- include "state-metrics.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "sealos-state-metric.selectorLabels" . | nindent 6 }}
+      {{- include "state-metrics.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
@@ -17,13 +17,13 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "sealos-state-metric.selectorLabels" . | nindent 8 }}
+        {{- include "state-metrics.selectorLabels" . | nindent 8 }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "sealos-state-metric.serviceAccountName" . }}
+      serviceAccountName: {{ include "state-metrics.serviceAccountName" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- with .Values.priorityClassName }}
@@ -33,7 +33,7 @@ spec:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          image: {{ include "sealos-state-metric.image" . }}
+          image: {{ include "state-metrics.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
@@ -41,7 +41,7 @@ spec:
               protocol: TCP
           envFrom:
             - configMapRef:
-                name: {{ include "sealos-state-metric.fullname" . }}
+                name: {{ include "state-metrics.fullname" . }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:

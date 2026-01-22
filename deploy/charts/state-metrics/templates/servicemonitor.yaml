@@ -2,19 +2,19 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "sealos-state-metric.fullname" . }}
+  name: {{ include "state-metrics.fullname" . }}
   {{- if .Values.serviceMonitor.namespace }}
   namespace: {{ .Values.serviceMonitor.namespace }}
   {{- end }}
   labels:
-    {{- include "sealos-state-metric.labels" . | nindent 4 }}
+    {{- include "state-metrics.labels" . | nindent 4 }}
     {{- with .Values.serviceMonitor.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
   selector:
     matchLabels:
-      {{- include "sealos-state-metric.selectorLabels" . | nindent 6 }}
+      {{- include "state-metrics.selectorLabels" . | nindent 6 }}
   endpoints:
     - port: http
       path: {{ .Values.config.metricsPath }}

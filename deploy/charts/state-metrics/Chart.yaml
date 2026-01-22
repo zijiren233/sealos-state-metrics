@@ -1,5 +1,5 @@
 apiVersion: v2
-name: sealos-state-metric
+name: state-metrics
 description: Kubernetes state metrics collector for Sealos monitoring
 type: application
 version: 0.1.0
