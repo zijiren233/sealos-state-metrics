@@ -114,6 +114,15 @@ func LoadFromYAML(path string, cfg *GlobalConfig) error {
 	return nil
 }
 
+// LoadFromYAMLContent loads configuration from YAML content into cfg
+func LoadFromYAMLContent(content []byte, cfg *GlobalConfig) error {
+	if err := yaml.Unmarshal(content, cfg); err != nil {
+		return fmt.Errorf("failed to unmarshal YAML: %w", err)
+	}
+
+	return nil
+}
+
 // ParseEnv parses environment variables into cfg
 func ParseEnv(cfg *GlobalConfig) error {
 	return env.Parse(cfg)

@@ -32,7 +32,6 @@ func NewCollector(factoryCtx *collector.FactoryContext) (collector.Collector, er
 		),
 		config:   cfg,
 		balances: make(map[string]float64),
-		stopCh:   make(chan struct{}),
 		logger:   factoryCtx.Logger,
 	}
 

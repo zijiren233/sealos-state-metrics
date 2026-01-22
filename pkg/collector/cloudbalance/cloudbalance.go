@@ -22,9 +22,6 @@ type Collector struct {
 	// Internal state
 	mu       sync.RWMutex
 	balances map[string]float64 // key: provider:accountID
-
-	// Control channels
-	stopCh chan struct{}
 }
 
 // initMetrics initializes Prometheus metric descriptors
@@ -56,7 +53,8 @@ func (c *Collector) Start(ctx context.Context) error {
 
 // Stop stops the collector
 func (c *Collector) Stop() error {
-	close(c.stopCh)
+	// BaseCollector.Stop() will cancel the context,
+	// which will cause pollLoop to exit via Context().Done()
 	return c.BaseCollector.Stop()
 }
 
@@ -85,9 +83,6 @@ func (c *Collector) pollLoop() {
 			if err := c.Poll(c.Context()); err != nil {
 				c.logger.WithError(err).Error("Failed to poll cloud balances")
 			}
-		case <-c.stopCh:
-			c.logger.Info("Stopping cloud balance poll loop")
-			return
 		case <-c.Context().Done():
 			c.logger.Info("Context cancelled, stopping cloud balance poll loop")
 			return

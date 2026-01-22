@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,16 +18,30 @@ import (
 	"github.com/zijiren233/sealos-state-metric/pkg/leaderelection"
 	"github.com/zijiren233/sealos-state-metric/pkg/registry"
 	"github.com/zijiren233/sealos-state-metric/pkg/util"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 // Server represents the HTTP server
 type Server struct {
 	config        *config.GlobalConfig
 	configContent []byte
+	configPath    string
 	httpServer    *http.Server
 	registry      *registry.Registry
 	promRegistry  *prometheus.Registry
 	leaderElector *leaderelection.LeaderElector
+	configReloader *config.Reloader
+
+	// Fields needed for reinitialization
+	mu         sync.Mutex
+	serverCtx  context.Context // Server context for accessing in reload
+	restConfig *rest.Config
+	client     kubernetes.Interface
+
+	// Leader election management
+	leCtxCancel context.CancelFunc
+	leMu        sync.Mutex
 }
 
 // NewServer creates a new server instance
@@ -48,6 +63,7 @@ func NewServer(cfg *config.GlobalConfig, configPath string) (*Server, error) {
 	return &Server{
 		config:        cfg,
 		configContent: configContent,
+		configPath:    configPath,
 		registry:      registry.GetRegistry(),
 		promRegistry:  prometheus.NewRegistry(),
 	}, nil
@@ -55,6 +71,13 @@ func NewServer(cfg *config.GlobalConfig, configPath string) (*Server, error) {
 
 // Run starts the server and blocks until it receives a shutdown signal
 func (s *Server) Run(ctx context.Context) error {
+	serverCtx := ctx
+
+	// Save server context for use in reload
+	s.mu.Lock()
+	s.serverCtx = serverCtx
+	s.mu.Unlock()
+
 	// Create Kubernetes client
 	restConfig, client, err := util.NewKubernetesClient(
 		s.config.Kubernetes.Kubeconfig,
@@ -65,9 +88,15 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
+	// Save for reinitialization
+	s.mu.Lock()
+	s.restConfig = restConfig
+	s.client = client
+	s.mu.Unlock()
+
 	// Initialize collectors
 	if err := s.registry.Initialize(
-		ctx,
+		serverCtx,
 		restConfig,
 		client,
 		s.configContent,
@@ -83,81 +112,24 @@ func (s *Server) Run(ctx context.Context) error {
 	promCollector := registry.NewPrometheusCollector(s.registry)
 	s.promRegistry.MustRegister(promCollector)
 
-	// Setup leader election if enabled
-	if s.config.LeaderElection.Enabled {
-		// When leader election is enabled, start collectors that don't require it immediately
-		log.Info("Starting collectors that don't require leader election")
-		allCollectors := s.registry.ListCollectors()
-		for _, name := range allCollectors {
-			if c, ok := s.registry.GetCollector(name); ok {
-				if !c.RequiresLeaderElection() {
-					if err := c.Start(ctx); err != nil {
-						log.WithError(err).
-							WithField("name", name).
-							Error("Failed to start non-leader collector")
-					} else {
-						log.WithField("name", name).Info("Non-leader collector started")
-					}
-				}
-			}
-		}
-		leConfig := &leaderelection.Config{
-			Namespace:     s.config.LeaderElection.Namespace,
-			LeaseName:     s.config.LeaderElection.LeaseName,
-			Identity:      s.config.Identity, // Use configured identity
-			LeaseDuration: s.config.LeaderElection.LeaseDuration,
-			RenewDeadline: s.config.LeaderElection.RenewDeadline,
-			RetryPeriod:   s.config.LeaderElection.RetryPeriod,
-		}
+	// Setup and start leader election or collectors
+	if err := s.setupLeaderElectionAndCollectors(serverCtx); err != nil {
+		return fmt.Errorf("failed to setup leader election and collectors: %w", err)
+	}
 
-		leLogger := log.WithField("component", "leader-election")
-
-		elector, err := leaderelection.NewLeaderElector(leConfig, client, leLogger)
+	// Setup configuration hot reload if config file is provided
+	if s.configPath != "" {
+		reloader, err := config.NewReloader(s.configPath, s.handleConfigReload)
 		if err != nil {
-			return fmt.Errorf("failed to create leader elector: %w", err)
+			return fmt.Errorf("failed to create config reloader: %w", err)
 		}
 
-		// Set callbacks
-		elector.SetCallbacks(
-			func(ctx context.Context) {
-				// OnStartedLeading: start collectors that require leader election
-				log.Info("Became leader, starting leader-required collectors")
-
-				if err := s.registry.StartWithLeaderElection(ctx, true); err != nil {
-					log.WithError(err).Error("Failed to start leader-required collectors")
-				}
-			},
-			func() {
-				// OnStoppedLeading: stop collectors that require leader election
-				log.Info("Lost leadership, stopping leader-required collectors")
-
-				if err := s.registry.StopWithLeaderElection(true); err != nil {
-					log.WithError(err).Error("Failed to stop leader-required collectors")
-				}
-			},
-			func(identity string) {
-				// OnNewLeader: log new leader
-				log.WithField("leader", identity).Info("New leader elected")
-			},
-		)
-
-		s.leaderElector = elector
-
-		// Run leader election in background
-		go func() {
-			log.Info("Starting leader election")
-
-			if err := elector.Run(ctx); err != nil {
-				log.WithError(err).Error("Leader election exited with error")
-			}
-		}()
-	} else {
-		// Start all collectors directly if leader election is disabled
-		log.Info("Leader election disabled, starting all collectors")
-
-		if err := s.registry.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start collectors: %w", err)
+		if err := reloader.Start(serverCtx); err != nil {
+			return fmt.Errorf("failed to start config reloader: %w", err)
 		}
+
+		s.configReloader = reloader
+		log.WithField("config_path", s.configPath).Info("Configuration hot reload enabled")
 	}
 
 	// Setup HTTP server
@@ -196,9 +168,191 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.Shutdown()
 }
 
+// setupLeaderElectionAndCollectors sets up leader election and starts collectors
+func (s *Server) setupLeaderElectionAndCollectors(serverCtx context.Context) error {
+	if s.config.LeaderElection.Enabled {
+		// When leader election is enabled, start collectors that don't require it immediately
+		log.Info("Starting collectors that don't require leader election")
+		allCollectors := s.registry.ListCollectors()
+		for _, name := range allCollectors {
+			if c, ok := s.registry.GetCollector(name); ok {
+				if !c.RequiresLeaderElection() {
+					if err := c.Start(serverCtx); err != nil {
+						log.WithError(err).
+							WithField("name", name).
+							Error("Failed to start non-leader collector")
+					} else {
+						log.WithField("name", name).Info("Non-leader collector started")
+					}
+				}
+			}
+		}
+
+		leConfig := &leaderelection.Config{
+			Namespace:     s.config.LeaderElection.Namespace,
+			LeaseName:     s.config.LeaderElection.LeaseName,
+			Identity:      s.config.Identity,
+			LeaseDuration: s.config.LeaderElection.LeaseDuration,
+			RenewDeadline: s.config.LeaderElection.RenewDeadline,
+			RetryPeriod:   s.config.LeaderElection.RetryPeriod,
+		}
+
+		leLogger := log.WithField("component", "leader-election")
+
+		elector, err := leaderelection.NewLeaderElector(leConfig, s.client, leLogger)
+		if err != nil {
+			return fmt.Errorf("failed to create leader elector: %w", err)
+		}
+
+		// Create context for this leader election instance
+		s.leMu.Lock()
+		leCtx, leCtxCancel := context.WithCancel(serverCtx)
+		s.leCtxCancel = leCtxCancel
+		s.leMu.Unlock()
+
+		// Set callbacks
+		elector.SetCallbacks(
+			func(ctx context.Context) {
+				// OnStartedLeading: start collectors that require leader election
+				log.Info("Became leader, starting leader-required collectors")
+
+				if err := s.registry.StartWithLeaderElection(ctx, true); err != nil {
+					log.WithError(err).Error("Failed to start leader-required collectors")
+				}
+			},
+			func() {
+				// OnStoppedLeading: stop collectors that require leader election
+				log.Info("Lost leadership, stopping leader-required collectors")
+
+				if err := s.registry.StopWithLeaderElection(true); err != nil {
+					log.WithError(err).Error("Failed to stop leader-required collectors")
+				}
+			},
+			func(identity string) {
+				// OnNewLeader: log new leader
+				log.WithField("leader", identity).Info("New leader elected")
+			},
+		)
+
+		s.leaderElector = elector
+
+		// Run leader election in background
+		go func() {
+			log.Info("Starting leader election")
+
+			if err := elector.Run(leCtx); err != nil {
+				log.WithError(err).Error("Leader election exited with error")
+			}
+		}()
+	} else {
+		// Start all collectors directly if leader election is disabled
+		log.Info("Leader election disabled, starting all collectors")
+
+		if err := s.registry.Start(serverCtx); err != nil {
+			return fmt.Errorf("failed to start collectors: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// stopLeaderElection stops the current leader election and releases the lease
+func (s *Server) stopLeaderElection() {
+	s.leMu.Lock()
+	defer s.leMu.Unlock()
+
+	if s.leCtxCancel != nil {
+		log.Info("Stopping leader election and releasing lease")
+		s.leCtxCancel()
+		// Give leader election time to release the lease gracefully
+		time.Sleep(500 * time.Millisecond)
+		s.leCtxCancel = nil
+	}
+}
+
+// handleConfigReload handles configuration file changes
+func (s *Server) handleConfigReload(newConfigContent []byte) error {
+	// Hold lock for the entire reload process
+	// This ensures only one reload executes at a time
+	// If another reload is triggered, it will block here until the first completes
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	logger := log.WithField("component", "config-reload")
+	logger.Info("Starting configuration reload")
+
+	// Validate we have what we need
+	if s.serverCtx == nil {
+		return fmt.Errorf("server context is nil")
+	}
+
+	// Parse and validate new configuration
+	newConfig := &config.GlobalConfig{}
+	if err := config.LoadFromYAMLContent(newConfigContent, newConfig); err != nil {
+		logger.WithError(err).Error("Failed to parse new configuration")
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	// Stop leader election first if enabled
+	// This releases the lease and allows another pod to become leader
+	if s.config.LeaderElection.Enabled {
+		logger.Info("Stopping leader election to release lease")
+		s.stopLeaderElection()
+	}
+
+	// Stop all collectors before reinitialization
+	logger.Info("Stopping all collectors for configuration reload")
+	if err := s.registry.Stop(); err != nil {
+		logger.WithError(err).Error("Failed to stop collectors")
+		return err
+	}
+
+	// Reinitialize registry with new configuration
+	if err := s.registry.Reinitialize(
+		s.serverCtx,
+		s.restConfig,
+		s.client,
+		newConfigContent,
+		newConfig.Metrics.Namespace,
+		newConfig.Performance.InformerResyncPeriod,
+		newConfig.EnabledCollectors,
+		newConfig.Identity,
+	); err != nil {
+		logger.WithError(err).Error("Failed to reinitialize collectors")
+		return err
+	}
+
+	// Restart leader election and collectors with new configuration
+	// This allows this pod to re-compete for leadership
+	if err := s.setupLeaderElectionAndCollectors(s.serverCtx); err != nil {
+		logger.WithError(err).Error("Failed to setup leader election and collectors")
+		return err
+	}
+
+	// Update config fields
+	s.config.EnabledCollectors = newConfig.EnabledCollectors
+	s.config.Metrics = newConfig.Metrics
+	s.configContent = newConfigContent
+
+	logger.Info("Configuration reload completed successfully")
+	return nil
+}
+
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown() error {
 	log.Info("Shutting down server")
+
+	// Stop leader election first to release the lease
+	if s.config.LeaderElection.Enabled {
+		s.stopLeaderElection()
+	}
+
+	// Stop config reloader
+	if s.configReloader != nil {
+		if err := s.configReloader.Stop(); err != nil {
+			log.WithError(err).Error("Failed to stop config reloader")
+		}
+	}
 
 	// Stop collectors
 	if err := s.registry.Stop(); err != nil {

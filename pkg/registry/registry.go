@@ -160,6 +160,98 @@ func (r *Registry) Initialize(
 	return nil
 }
 
+// Reinitialize reinitializes all collectors with new configuration.
+// This is used for configuration hot-reloading.
+// It stops all existing collectors, clears them, and reinitializes with new config.
+func (r *Registry) Reinitialize(
+	ctx context.Context,
+	restConfig *rest.Config,
+	client kubernetes.Interface,
+	configContent []byte,
+	metricsNamespace string,
+	informerResyncPeriod time.Duration,
+	enabledCollectors []string,
+	configIdentity string,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	logger := log.WithField("module", "registry")
+	logger.Info("Reinitializing collectors with new configuration")
+
+	// Stop all existing collectors
+	for name, c := range r.collectors {
+		if err := c.Stop(); err != nil {
+			logger.WithError(err).
+				WithField("name", name).
+				Error("Failed to stop collector during reinitialization")
+		}
+	}
+
+	// Clear collectors map
+	r.collectors = make(map[string]collector.Collector)
+
+	// Reinitialize instance identity
+	r.instance = identity.GetWithConfig(configIdentity)
+
+	logger.WithFields(log.Fields{
+		"enabled":  enabledCollectors,
+		"instance": r.instance,
+	}).Info("Reinitializing collectors")
+
+	// Create module config loader with pipe mode: content -> env
+	configLoader := config.NewWrapConfigLoader()
+
+	// Add content loader if config content is provided
+	if len(configContent) > 0 {
+		configLoader.Add(config.NewModuleConfigLoader(configContent))
+	}
+
+	// Always add env loader (highest priority)
+	configLoader.Add(config.NewEnvConfigLoader())
+
+	// Create base logger
+	baseLogger := log.WithField("module", "registry")
+
+	for _, name := range enabledCollectors {
+		factory, exists := r.factories[name]
+		if !exists {
+			logger.Warnf("Collector factory not found: %s", name)
+			continue
+		}
+
+		// Create collector-specific logger with collector name field
+		collectorLogger := baseLogger.WithField("collector", name)
+
+		// Create FactoryContext with collector-specific logger
+		factoryCtx := &collector.FactoryContext{
+			Ctx:                  ctx,
+			RestConfig:           restConfig,
+			Client:               client,
+			ConfigLoader:         configLoader,
+			MetricsNamespace:     metricsNamespace,
+			InformerResyncPeriod: informerResyncPeriod,
+			Logger:               collectorLogger,
+		}
+
+		c, err := factory(factoryCtx)
+		if err != nil {
+			logger.WithField("name", name).WithError(err).Debug("Collector not enabled")
+			continue
+		}
+
+		r.collectors[name] = c
+		logger.WithFields(log.Fields{
+			"name": name,
+			"type": c.Type(),
+		}).Info("Collector reinitialized")
+	}
+
+	logger.Info("Collector reinitialization complete")
+
+	return nil
+}
+
 // Start starts all registered collectors
 func (r *Registry) Start(ctx context.Context) error {
 	return r.StartWithLeaderElection(ctx, false)
