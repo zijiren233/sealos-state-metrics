@@ -48,10 +48,6 @@ logging:
 performance:
   # Kubernetes informer resync period
   informerResyncPeriod: "10m"
-  # Number of worker goroutines
-  workers: 10
-  # Metrics update interval
-  metricsUpdateInterval: "1m"
 
 # List of enabled collectors
 # Available collectors: domain, node, pod, imagepull, zombie, cloudbalance

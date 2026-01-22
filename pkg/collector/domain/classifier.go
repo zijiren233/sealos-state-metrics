@@ -11,13 +11,13 @@ type ErrorType string
 
 const (
 	// HTTP errors
-	ErrorTypeConnectionRefused    ErrorType = "ConnectionRefused"
-	ErrorTypeTimeout              ErrorType = "Timeout"
-	ErrorTypeDNSError             ErrorType = "DNSError"
-	ErrorTypeHTTPClientError      ErrorType = "HTTPClientError"  // 4xx
-	ErrorTypeHTTPServerError      ErrorType = "HTTPServerError"  // 5xx
-	ErrorTypeSSLError             ErrorType = "SSLError"
-	ErrorTypeNetworkError         ErrorType = "NetworkError"
+	ErrorTypeConnectionRefused ErrorType = "ConnectionRefused"
+	ErrorTypeTimeout           ErrorType = "Timeout"
+	ErrorTypeDNSError          ErrorType = "DNSError"
+	ErrorTypeHTTPClientError   ErrorType = "HTTPClientError" // 4xx
+	ErrorTypeHTTPServerError   ErrorType = "HTTPServerError" // 5xx
+	ErrorTypeSSLError          ErrorType = "SSLError"
+	ErrorTypeNetworkError      ErrorType = "NetworkError"
 
 	// Certificate errors
 	ErrorTypeCertExpired          ErrorType = "CertExpired"
@@ -26,8 +26,8 @@ const (
 	ErrorTypeCertHostnameMismatch ErrorType = "CertHostnameMismatch"
 
 	// Unknown
-	ErrorTypeUnknown              ErrorType = "Unknown"
-	ErrorTypeNone                 ErrorType = "None"  // No error
+	ErrorTypeUnknown ErrorType = "Unknown"
+	ErrorTypeNone    ErrorType = "None" // No error
 )
 
 var (

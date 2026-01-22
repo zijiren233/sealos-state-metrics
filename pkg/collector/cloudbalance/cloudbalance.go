@@ -115,6 +115,7 @@ func (c *Collector) Poll(ctx context.Context) error {
 				"provider":   account.Provider,
 				"account_id": account.AccountID,
 			}).WithError(err).Error("Failed to query cloud balance")
+
 			continue
 		}
 
@@ -138,6 +139,7 @@ func (c *Collector) collect(ch chan<- prometheus.Metric) {
 
 	for _, account := range c.config.Accounts {
 		key := string(account.Provider) + ":" + account.AccountID
+
 		balance, exists := c.balances[key]
 		if !exists {
 			continue

@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/alecthomas/kong"
 	"github.com/caarlos0/env/v9"
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
@@ -17,8 +18,8 @@ import (
 // Module-specific configs are managed by each module independently
 type GlobalConfig struct {
 	// Configuration files
-	ConfigPath string `yaml:"-" short:"c" help:"Path to configuration file (YAML format)" type:"path"`
-	EnvFile    string `yaml:"-" help:"Path to .env file for environment variables" default:".env" type:"path"`
+	ConfigPath string `yaml:"-" short:"c" help:"Path to configuration file (YAML format)"    type:"path"`
+	EnvFile    string `yaml:"-"           help:"Path to .env file for environment variables" type:"path" default:".env"`
 
 	// Server configuration
 	Server ServerConfig `yaml:"server" embed:"" prefix:"server-" envprefix:"SERVER_"`
@@ -45,40 +46,58 @@ type GlobalConfig struct {
 	Identity string `yaml:"identity" help:"Instance identity (overrides auto-detection)" env:"IDENTITY"`
 }
 
+// ApplyHotReload applies hot-reloadable fields from newConfig
+// Note: Server and Logging configs require restart and are not updated
+func (c *GlobalConfig) ApplyHotReload(newConfig *GlobalConfig) {
+	c.Kubernetes = newConfig.Kubernetes
+	c.Metrics = newConfig.Metrics
+	c.LeaderElection = newConfig.LeaderElection
+	c.Performance = newConfig.Performance
+	c.EnabledCollectors = newConfig.EnabledCollectors
+	c.Identity = newConfig.Identity
+}
+
 // ServerConfig contains HTTP server configuration
 type ServerConfig struct {
-	Address     string `yaml:"address"     name:"address"      env:"ADDRESS"      default:":9090"     help:"Server listen address"`
-	MetricsPath string `yaml:"metricsPath" name:"metrics-path" env:"METRICS_PATH" default:"/metrics"  help:"Metrics endpoint path"`
-	HealthPath  string `yaml:"healthPath"  name:"health-path"  env:"HEALTH_PATH"  default:"/health"   help:"Health check endpoint path"`
+	Address     string `yaml:"address"     name:"address"      env:"ADDRESS"      default:":9090"    help:"Server listen address"`
+	MetricsPath string `yaml:"metricsPath" name:"metrics-path" env:"METRICS_PATH" default:"/metrics" help:"Metrics endpoint path"`
+	HealthPath  string `yaml:"healthPath"  name:"health-path"  env:"HEALTH_PATH"  default:"/health"  help:"Health check endpoint path"`
 }
 
 // KubernetesConfig contains Kubernetes client configuration
 type KubernetesConfig struct {
-	Kubeconfig string  `yaml:"kubeconfig" name:"kubeconfig" env:"KUBECONFIG"  help:"Path to kubeconfig file (leave empty for in-cluster config)" type:"path"`
-	QPS        float32 `yaml:"qps"        name:"qps"        env:"QPS"         default:"50"    help:"Kubernetes client QPS limit"`
-	Burst      int     `yaml:"burst"      name:"burst"      env:"BURST"       default:"100"   help:"Kubernetes client burst limit"`
+	Kubeconfig string  `yaml:"kubeconfig" name:"kubeconfig" env:"KUBECONFIG" help:"Path to kubeconfig file (leave empty for in-cluster config)" type:"path"`
+	QPS        float32 `yaml:"qps"        name:"qps"        env:"QPS"        help:"Kubernetes client QPS limit"                                             envDefault:"50"  default:"50"`
+	Burst      int     `yaml:"burst"      name:"burst"      env:"BURST"      help:"Kubernetes client burst limit"                                           envDefault:"100" default:"100"`
+}
+
+// Equal checks if two KubernetesConfig are equal
+func (c KubernetesConfig) Equal(other KubernetesConfig) bool {
+	return c.Kubeconfig == other.Kubeconfig &&
+		c.QPS == other.QPS &&
+		c.Burst == other.Burst
 }
 
 // MetricsConfig contains Prometheus metrics configuration
 type MetricsConfig struct {
-	Namespace string `yaml:"namespace" name:"namespace" env:"NAMESPACE" default:"sealos" help:"Prometheus metrics namespace"`
+	Namespace string `yaml:"namespace" name:"namespace" env:"NAMESPACE" envDefault:"sealos" default:"sealos" help:"Prometheus metrics namespace"`
 }
 
 // LeaderElectionConfig contains leader election configuration
 type LeaderElectionConfig struct {
-	Enabled       bool          `yaml:"enabled"       name:"enabled"        env:"ENABLED"        default:"true"                  help:"Enable leader election"`
-	Namespace     string        `yaml:"namespace"     name:"namespace"      env:"NAMESPACE"                                      help:"Namespace for leader election lease (empty disables LE)"`
-	LeaseName     string        `yaml:"leaseName"     name:"lease-name"     env:"LEASE_NAME"     default:"sealos-state-metric"   help:"Name of the leader election lease"`
-	LeaseDuration time.Duration `yaml:"leaseDuration" name:"lease-duration" env:"LEASE_DURATION" default:"15s"                    help:"Leader election lease duration"`
-	RenewDeadline time.Duration `yaml:"renewDeadline" name:"renew-deadline" env:"RENEW_DEADLINE" default:"10s"                    help:"Leader election renew deadline"`
-	RetryPeriod   time.Duration `yaml:"retryPeriod"   name:"retry-period"   env:"RETRY_PERIOD"   default:"2s"                     help:"Leader election retry period"`
+	Enabled       bool          `yaml:"enabled"       name:"enabled"        env:"ENABLED"        envDefault:"true"                default:"true"                help:"Enable leader election"`
+	Namespace     string        `yaml:"namespace"     name:"namespace"      env:"NAMESPACE"                                                                     help:"Namespace for leader election lease (empty disables LE)"`
+	LeaseName     string        `yaml:"leaseName"     name:"lease-name"     env:"LEASE_NAME"     envDefault:"sealos-state-metric" default:"sealos-state-metric" help:"Name of the leader election lease"`
+	LeaseDuration time.Duration `yaml:"leaseDuration" name:"lease-duration" env:"LEASE_DURATION" envDefault:"15s"                 default:"15s"                 help:"Leader election lease duration"`
+	RenewDeadline time.Duration `yaml:"renewDeadline" name:"renew-deadline" env:"RENEW_DEADLINE" envDefault:"10s"                 default:"10s"                 help:"Leader election renew deadline"`
+	RetryPeriod   time.Duration `yaml:"retryPeriod"   name:"retry-period"   env:"RETRY_PERIOD"   envDefault:"2s"                  default:"2s"                  help:"Leader election retry period"`
 }
 
 // LoggingConfig contains logging configuration
 type LoggingConfig struct {
-	Level  string `yaml:"level"  name:"level"  env:"LEVEL"  default:"info" enum:"debug,info,warn,error" help:"Log level"`
-	Format string `yaml:"format" name:"format" env:"FORMAT" default:"json" enum:"json,text"             help:"Log format"`
-	Debug  bool   `yaml:"debug"  name:"debug"  env:"DEBUG"  default:"false"                            help:"Enable debug mode"`
+	Level  string `yaml:"level"  name:"level"  env:"LEVEL"  default:"info"  enum:"debug,info,warn,error" help:"Log level"`
+	Format string `yaml:"format" name:"format" env:"FORMAT" default:"json"  enum:"json,text"             help:"Log format"`
+	Debug  bool   `yaml:"debug"  name:"debug"  env:"DEBUG"  default:"false"                              help:"Enable debug mode"`
 }
 
 // ToLoggerOptions converts LoggingConfig to logger initialization options
@@ -88,9 +107,7 @@ func (c *LoggingConfig) ToLoggerOptions() (debug bool, level, format string) {
 
 // PerformanceConfig contains performance tuning configuration
 type PerformanceConfig struct {
-	InformerResyncPeriod  time.Duration `yaml:"informerResyncPeriod"  name:"informer-resync-period"   env:"INFORMER_RESYNC_PERIOD"  default:"10m" help:"Kubernetes informer resync period" hidden:""`
-	Workers               int           `yaml:"workers"               name:"workers"                  env:"WORKERS"                 default:"10"  help:"Number of worker goroutines"       hidden:""`
-	MetricsUpdateInterval time.Duration `yaml:"metricsUpdateInterval" name:"metrics-update-interval"  env:"METRICS_UPDATE_INTERVAL" default:"1m"  help:"Metrics update interval"            hidden:""`
+	InformerResyncPeriod time.Duration `yaml:"informerResyncPeriod" name:"informer-resync-period" env:"INFORMER_RESYNC_PERIOD" envDefault:"10m" default:"10m" help:"Kubernetes informer resync period" hidden:""`
 }
 
 // LoadEnvFile loads environment variables from a .env file
@@ -105,13 +122,7 @@ func LoadFromYAML(path string, cfg *GlobalConfig) error {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return fmt.Errorf("failed to unmarshal YAML: %w", err)
-	}
-
-	log.WithField("file", path).Info("Configuration loaded from YAML")
-
-	return nil
+	return LoadFromYAMLContent(data, cfg)
 }
 
 // LoadFromYAMLContent loads configuration from YAML content into cfg
@@ -212,6 +223,7 @@ func (c *GlobalConfig) Validate() error {
 	if c.LeaderElection.Namespace == "" {
 		if c.LeaderElection.Enabled {
 			log.Warn("Leader election namespace is empty, automatically disabling leader election")
+
 			c.LeaderElection.Enabled = false
 		}
 	} else if c.LeaderElection.Enabled {
@@ -227,4 +239,64 @@ func (c *GlobalConfig) Validate() error {
 	}
 
 	return nil
+}
+
+// LoadOptions contains options for loading configuration
+type LoadOptions struct {
+	// Args are CLI arguments (without program name)
+	Args []string
+	// ConfigContent is YAML config content (if provided, takes precedence over file)
+	ConfigContent []byte
+	// EnvFile is path to .env file
+	EnvFile string
+}
+
+// LoadGlobalConfig loads configuration with priority: CLI flags (defaults) < YAML < env vars
+// This function can be used for both initial load and reload
+func LoadGlobalConfig(opts LoadOptions) (*GlobalConfig, error) {
+	cfg := &GlobalConfig{}
+
+	// Step 1: Parse CLI args with kong (applies defaults)
+	parser, err := kong.New(cfg,
+		kong.Name("sealos-state-metric"),
+		kong.Description("Sealos state metrics collector for Kubernetes"),
+		kong.Exit(func(int) {}), // Don't exit on parse error
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create config parser: %w", err)
+	}
+
+	if _, err := parser.Parse(opts.Args); err != nil {
+		return nil, fmt.Errorf("failed to parse CLI args: %w", err)
+	}
+
+	// Step 2: Load .env file if specified
+	if opts.EnvFile != "" {
+		if err := godotenv.Load(opts.EnvFile); err != nil {
+			log.WithFields(log.Fields{
+				"file":  opts.EnvFile,
+				"error": err,
+			}).Debug("No .env file loaded")
+		} else {
+			log.WithField("file", opts.EnvFile).Info("Loaded environment from .env file")
+		}
+	}
+
+	// Step 3: Overlay YAML config
+	if len(opts.ConfigContent) > 0 {
+		if err := yaml.Unmarshal(opts.ConfigContent, cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse YAML config: %w", err)
+		}
+	} else if cfg.ConfigPath != "" {
+		if err := LoadFromYAML(cfg.ConfigPath, cfg); err != nil {
+			return nil, fmt.Errorf("failed to load config from YAML: %w", err)
+		}
+	}
+
+	// Step 4: Overlay environment variables (highest priority)
+	if err := env.Parse(cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse environment variables: %w", err)
+	}
+
+	return cfg, nil
 }

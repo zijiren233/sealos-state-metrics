@@ -1,66 +1,69 @@
-package config
+package config_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/zijiren233/sealos-state-metric/pkg/config"
 )
 
 func TestReloader(t *testing.T) {
-	// Create a temporary directory for test
-	tmpDir, err := os.MkdirTemp("", "reloader-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	// Create initial config file
 	configPath := filepath.Join(tmpDir, "config.yaml")
+
 	initialContent := []byte("initial: config")
-	if err := os.WriteFile(configPath, initialContent, 0644); err != nil {
+	if err := os.WriteFile(configPath, initialContent, 0o600); err != nil {
 		t.Fatalf("Failed to write initial config: %v", err)
 	}
 
 	// Track reload callbacks
 	var mu sync.Mutex
+
 	reloadCount := 0
 	lastContent := []byte{}
 
 	callback := func(content []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
+
 		reloadCount++
 		lastContent = content
 		t.Logf("Reload #%d triggered with content: %s", reloadCount, string(content))
+
 		return nil
 	}
 
 	// Create and start reloader
-	reloader, err := NewReloader(configPath, callback)
+	reloader, err := config.NewReloader(configPath, callback)
 	if err != nil {
 		t.Fatalf("Failed to create reloader: %v", err)
 	}
 
 	// Reduce debounce time for testing
-	reloader.debounce = 500 * time.Millisecond
+	reloader.SetDebounce(500 * time.Millisecond)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := reloader.Start(ctx); err != nil {
 		t.Fatalf("Failed to start reloader: %v", err)
 	}
-	defer reloader.Stop()
+	defer func() {
+		if err := reloader.Stop(); err != nil {
+			t.Logf("Failed to stop reloader: %v", err)
+		}
+	}()
 
 	// Give watcher time to initialize
 	time.Sleep(200 * time.Millisecond)
 
 	// Update config file
 	updatedContent := []byte("updated: config")
-	if err := os.WriteFile(configPath, updatedContent, 0644); err != nil {
+	if err := os.WriteFile(configPath, updatedContent, 0o600); err != nil {
 		t.Fatalf("Failed to write updated config: %v", err)
 	}
 
@@ -69,8 +72,10 @@ func TestReloader(t *testing.T) {
 
 	// Check if reload was triggered
 	mu.Lock()
+
 	count := reloadCount
 	content := string(lastContent)
+
 	mu.Unlock()
 
 	if count == 0 {
@@ -85,21 +90,16 @@ func TestReloader(t *testing.T) {
 }
 
 func TestReloaderSymlink(t *testing.T) {
-	// Create a temporary directory simulating Kubernetes ConfigMap structure
-	tmpDir, err := os.MkdirTemp("", "reloader-symlink-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	// Create version directories like Kubernetes does
 	v1Dir := filepath.Join(tmpDir, "..2026_01_22_21_00_00")
-	if err := os.MkdirAll(v1Dir, 0755); err != nil {
+	if err := os.MkdirAll(v1Dir, 0o755); err != nil {
 		t.Fatalf("Failed to create v1 dir: %v", err)
 	}
 
 	v1ConfigPath := filepath.Join(v1Dir, "config.yaml")
-	if err := os.WriteFile(v1ConfigPath, []byte("version: 1"), 0644); err != nil {
+	if err := os.WriteFile(v1ConfigPath, []byte("version: 1"), 0o600); err != nil {
 		t.Fatalf("Failed to write v1 config: %v", err)
 	}
 
@@ -117,48 +117,55 @@ func TestReloaderSymlink(t *testing.T) {
 
 	// Track reload callbacks
 	var mu sync.Mutex
+
 	reloadCount := 0
 
 	callback := func(content []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
+
 		reloadCount++
 		t.Logf("Reload #%d triggered with content: %s", reloadCount, string(content))
+
 		return nil
 	}
 
 	// Create and start reloader watching the symlink
-	reloader, err := NewReloader(configSymlink, callback)
+	reloader, err := config.NewReloader(configSymlink, callback)
 	if err != nil {
 		t.Fatalf("Failed to create reloader: %v", err)
 	}
 
-	reloader.debounce = 500 * time.Millisecond
+	reloader.SetDebounce(500 * time.Millisecond)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := reloader.Start(ctx); err != nil {
 		t.Fatalf("Failed to start reloader: %v", err)
 	}
-	defer reloader.Stop()
+	defer func() {
+		if err := reloader.Stop(); err != nil {
+			t.Logf("Failed to stop reloader: %v", err)
+		}
+	}()
 
 	time.Sleep(200 * time.Millisecond)
 
 	// Simulate Kubernetes ConfigMap update:
 	// 1. Create new version directory
 	v2Dir := filepath.Join(tmpDir, "..2026_01_22_21_01_00")
-	if err := os.MkdirAll(v2Dir, 0755); err != nil {
+	if err := os.MkdirAll(v2Dir, 0o755); err != nil {
 		t.Fatalf("Failed to create v2 dir: %v", err)
 	}
 
 	v2ConfigPath := filepath.Join(v2Dir, "config.yaml")
-	if err := os.WriteFile(v2ConfigPath, []byte("version: 2"), 0644); err != nil {
+	if err := os.WriteFile(v2ConfigPath, []byte("version: 2"), 0o600); err != nil {
 		t.Fatalf("Failed to write v2 config: %v", err)
 	}
 
 	// 2. Remove old ..data symlink
 	t.Log("Removing old ..data symlink")
+
 	if err := os.Remove(dataSymlink); err != nil {
 		t.Fatalf("Failed to remove old ..data symlink: %v", err)
 	}
@@ -168,6 +175,7 @@ func TestReloaderSymlink(t *testing.T) {
 
 	// 3. Create new ..data symlink pointing to v2
 	t.Log("Creating new ..data symlink pointing to v2")
+
 	if err := os.Symlink(v2Dir, dataSymlink); err != nil {
 		t.Fatalf("Failed to create new ..data symlink: %v", err)
 	}
@@ -175,6 +183,7 @@ func TestReloaderSymlink(t *testing.T) {
 	// 4. Touch the target file to trigger a Write event
 	// This simulates what actually happens in Kubernetes when the content changes
 	t.Log("Touching v2 config file to trigger event")
+
 	if err := os.Chtimes(v2ConfigPath, time.Now(), time.Now()); err != nil {
 		t.Logf("Warning: Failed to touch v2 config: %v", err)
 	}
@@ -185,7 +194,9 @@ func TestReloaderSymlink(t *testing.T) {
 
 	// Check if reload was triggered
 	mu.Lock()
+
 	count := reloadCount
+
 	mu.Unlock()
 
 	// NOTE: This test may not reliably trigger on all platforms due to
@@ -193,7 +204,9 @@ func TestReloaderSymlink(t *testing.T) {
 	// In real Kubernetes environments, the atomic writer used by kubelet
 	// will trigger the necessary file system events.
 	if count == 0 {
-		t.Skip("Symlink update did not trigger reload on this platform - this is expected on macOS. Test would pass in Kubernetes.")
+		t.Skip(
+			"Symlink update did not trigger reload on this platform - this is expected on macOS. Test would pass in Kubernetes.",
+		)
 	}
 
 	// Verify we can read the new content through the symlink

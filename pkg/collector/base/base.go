@@ -22,7 +22,8 @@ type BaseCollector struct {
 	mu        sync.RWMutex
 	started   atomic.Bool
 	ready     atomic.Bool
-	readyCond *sync.Cond
+	readyCh   chan struct{} // closed when ready, recreated on Start
+	stoppedCh chan struct{} // closed when stopped, for WaitReady to detect stop
 	//nolint:containedctx // Context is intentionally stored to manage collector lifecycle between Start/Stop
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -41,15 +42,13 @@ func NewBaseCollector(
 	collectorType collector.CollectorType,
 	logger *log.Entry,
 ) *BaseCollector {
-	bc := &BaseCollector{
+	return &BaseCollector{
 		name:                   name,
 		collectorType:          collectorType,
 		requiresLeaderElection: true, // Default: require leader election
 		logger:                 logger,
 		descs:                  make([]*prometheus.Desc, 0),
 	}
-	bc.readyCond = sync.NewCond(&bc.mu)
-	return bc
 }
 
 // NewBaseCollectorWithLeaderElection creates a new BaseCollector with custom leader election requirement
@@ -59,15 +58,13 @@ func NewBaseCollectorWithLeaderElection(
 	requiresLeaderElection bool,
 	logger *log.Entry,
 ) *BaseCollector {
-	bc := &BaseCollector{
+	return &BaseCollector{
 		name:                   name,
 		collectorType:          collectorType,
 		requiresLeaderElection: requiresLeaderElection,
 		logger:                 logger,
 		descs:                  make([]*prometheus.Desc, 0),
 	}
-	bc.readyCond = sync.NewCond(&bc.mu)
-	return bc
 }
 
 // Name returns the collector name
@@ -104,6 +101,9 @@ func (b *BaseCollector) Start(ctx context.Context) error {
 
 	b.ctx, b.cancel = context.WithCancel(ctx)
 	b.started.Store(true)
+	b.ready.Store(false)
+	b.readyCh = make(chan struct{})
+	b.stoppedCh = make(chan struct{})
 
 	b.logger.WithFields(log.Fields{
 		"name": b.name,
@@ -129,6 +129,12 @@ func (b *BaseCollector) Stop() error {
 	b.started.Store(false)
 	b.ready.Store(false)
 
+	// Close stoppedCh to notify WaitReady callers
+	if b.stoppedCh != nil {
+		close(b.stoppedCh)
+		b.stoppedCh = nil
+	}
+
 	b.logger.WithField("name", b.name).Info("Collector stopped")
 
 	return nil
@@ -140,15 +146,26 @@ func (b *BaseCollector) IsStarted() bool {
 }
 
 // SetReady marks the collector as ready to collect metrics
+// Note: Once ready, the collector cannot become not-ready again (except through Stop/Start cycle)
 func (b *BaseCollector) SetReady(ready bool) {
+	if !ready {
+		return // Ignoring SetReady(false), use Stop() instead
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.ready.Store(ready)
-	if ready {
-		b.logger.WithField("name", b.name).Debug("Collector marked as ready")
-		// Broadcast to all waiting goroutines
-		b.readyCond.Broadcast()
+	// Only set ready once per Start cycle
+	if b.ready.Load() {
+		return
+	}
+
+	b.ready.Store(true)
+	b.logger.WithField("name", b.name).Debug("Collector marked as ready")
+
+	// Close readyCh to notify WaitReady callers
+	if b.readyCh != nil {
+		close(b.readyCh)
 	}
 }
 
@@ -158,28 +175,29 @@ func (b *BaseCollector) IsReady() bool {
 }
 
 // WaitReady blocks until the collector is ready to collect metrics
-// Returns immediately if already ready, or if context is cancelled
+// Returns nil if ready, or an error if context is cancelled or collector is stopped
 func (b *BaseCollector) WaitReady(ctx context.Context) error {
 	// Fast path: already ready
 	if b.ready.Load() {
 		return nil
 	}
 
-	// Wait for ready signal or context cancellation
-	done := make(chan struct{})
-	go func() {
-		b.mu.Lock()
-		defer b.mu.Unlock()
+	// Get channels under lock
+	b.mu.RLock()
+	readyCh := b.readyCh
+	stoppedCh := b.stoppedCh
+	b.mu.RUnlock()
 
-		for !b.ready.Load() {
-			b.readyCond.Wait()
-		}
-		close(done)
-	}()
+	// Check if collector was started
+	if readyCh == nil {
+		return fmt.Errorf("collector %s not started", b.name)
+	}
 
 	select {
-	case <-done:
+	case <-readyCh:
 		return nil
+	case <-stoppedCh:
+		return fmt.Errorf("collector %s stopped before becoming ready", b.name)
 	case <-ctx.Done():
 		return ctx.Err()
 	}

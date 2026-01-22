@@ -77,6 +77,7 @@ func generateRandomID() string {
 	if _, err := rand.Read(b); err != nil {
 		return "unknown"
 	}
+
 	return "instance-" + hex.EncodeToString(b)
 }
 

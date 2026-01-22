@@ -47,6 +47,14 @@ func NewReloader(configPath string, callback ReloadCallback) (*Reloader, error) 
 	}, nil
 }
 
+// SetDebounce sets the debounce duration for configuration changes
+func (r *Reloader) SetDebounce(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.debounce = d
+}
+
 // Start starts watching the configuration file
 func (r *Reloader) Start(ctx context.Context) error {
 	// Watch the directory containing the config file
@@ -72,14 +80,17 @@ func (r *Reloader) Start(ctx context.Context) error {
 func (r *Reloader) Stop() error {
 	r.stopOnce.Do(func() {
 		close(r.stopCh)
+
 		if r.watcher != nil {
 			_ = r.watcher.Close()
 		}
 
 		r.mu.Lock()
+
 		if r.timer != nil {
 			r.timer.Stop()
 		}
+
 		r.mu.Unlock()
 	})
 
@@ -122,8 +133,8 @@ func (r *Reloader) watchLoop(ctx context.Context) {
 			// React to Write, Create, and Remove events
 			// Remove is important for Kubernetes ConfigMap updates where ..data symlink is removed then recreated
 			if event.Op&fsnotify.Write == fsnotify.Write ||
-			   event.Op&fsnotify.Create == fsnotify.Create ||
-			   event.Op&fsnotify.Remove == fsnotify.Remove {
+				event.Op&fsnotify.Create == fsnotify.Create ||
+				event.Op&fsnotify.Remove == fsnotify.Remove {
 				r.logger.WithFields(log.Fields{
 					"event": event.Op.String(),
 					"path":  event.Name,
@@ -136,6 +147,7 @@ func (r *Reloader) watchLoop(ctx context.Context) {
 			if !ok {
 				return
 			}
+
 			r.logger.WithError(err).Error("File watcher error")
 
 		case <-r.stopCh:
@@ -185,5 +197,6 @@ func (r *Reloader) reload() error {
 	}
 
 	r.logger.Info("Configuration reloaded successfully")
+
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -79,18 +80,22 @@ func MustRegister(name string, factory collector.Factory) {
 	Register(name, factory)
 }
 
+// InitConfig holds the configuration for initializing collectors
+type InitConfig struct {
+	//nolint:containedctx // Context passed to collectors for lifecycle management
+	Ctx                  context.Context
+	RestConfig           *rest.Config
+	Client               kubernetes.Interface
+	ConfigContent        []byte
+	MetricsNamespace     string
+	InformerResyncPeriod time.Duration
+	EnabledCollectors    []string
+	Identity             string
+}
+
 // Initialize creates collector instances for the specified collectors.
 // It should be called once during application startup.
-func (r *Registry) Initialize(
-	ctx context.Context,
-	restConfig *rest.Config,
-	client kubernetes.Interface,
-	configContent []byte,
-	metricsNamespace string,
-	informerResyncPeriod time.Duration,
-	enabledCollectors []string,
-	configIdentity string,
-) error {
+func (r *Registry) Initialize(cfg *InitConfig) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -98,92 +103,23 @@ func (r *Registry) Initialize(
 		return errors.New("registry already initialized")
 	}
 
-	// Set instance identity using config or auto-detection
-	r.instance = identity.GetWithConfig(configIdentity)
-
-	logger := log.WithField("module", "registry")
-	logger.WithFields(log.Fields{
-		"enabled":  enabledCollectors,
-		"instance": r.instance,
-	}).Info("Initializing collectors")
-
-	// Create module config loader with pipe mode: content -> env
-	// ConfigLoader is never nil - use NullLoader as fallback
-	// The pipe ensures configuration priority: defaults < content < env variables
-	configLoader := config.NewWrapConfigLoader()
-
-	// Add content loader if config content is provided
-	if len(configContent) > 0 {
-		configLoader.Add(config.NewModuleConfigLoader(configContent))
-	}
-
-	// Always add env loader (highest priority)
-	configLoader.Add(config.NewEnvConfigLoader())
-
-	// Create base logger
-	baseLogger := log.WithField("module", "registry")
-
-	for _, name := range enabledCollectors {
-		factory, exists := r.factories[name]
-		if !exists {
-			logger.Warnf("Collector factory not found: %s", name)
-			continue
-		}
-
-		// Create collector-specific logger with collector name field
-		collectorLogger := baseLogger.WithField("collector", name)
-
-		// Create FactoryContext with collector-specific logger
-		factoryCtx := &collector.FactoryContext{
-			Ctx:                  ctx,
-			RestConfig:           restConfig,
-			Client:               client,
-			ConfigLoader:         configLoader,
-			MetricsNamespace:     metricsNamespace,
-			InformerResyncPeriod: informerResyncPeriod,
-			Logger:               collectorLogger,
-		}
-
-		c, err := factory(factoryCtx)
-		if err != nil {
-			logger.WithField("name", name).WithError(err).Debug("Collector not enabled")
-			continue
-		}
-
-		r.collectors[name] = c
-		logger.WithFields(log.Fields{
-			"name": name,
-			"type": c.Type(),
-		}).Info("Collector initialized")
-	}
+	r.createCollectors(cfg, "Initializing")
 
 	return nil
 }
 
 // Reinitialize reinitializes all collectors with new configuration.
 // This is used for configuration hot-reloading.
-// It stops all existing collectors, clears them, and reinitializes with new config.
-func (r *Registry) Reinitialize(
-	ctx context.Context,
-	restConfig *rest.Config,
-	client kubernetes.Interface,
-	configContent []byte,
-	metricsNamespace string,
-	informerResyncPeriod time.Duration,
-	enabledCollectors []string,
-	configIdentity string,
-) error {
+func (r *Registry) Reinitialize(cfg *InitConfig) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	logger := log.WithField("module", "registry")
-	logger.Info("Reinitializing collectors with new configuration")
 
 	// Stop all existing collectors
 	for name, c := range r.collectors {
 		if err := c.Stop(); err != nil {
-			logger.WithError(err).
-				WithField("name", name).
+			logger.WithError(err).WithField("name", name).
 				Error("Failed to stop collector during reinitialization")
 		}
 	}
@@ -191,47 +127,48 @@ func (r *Registry) Reinitialize(
 	// Clear collectors map
 	r.collectors = make(map[string]collector.Collector)
 
-	// Reinitialize instance identity
-	r.instance = identity.GetWithConfig(configIdentity)
+	r.createCollectors(cfg, "Reinitializing")
+
+	return nil
+}
+
+// createCollectors creates collector instances from factories
+// Must be called with r.mu held
+func (r *Registry) createCollectors(cfg *InitConfig, action string) {
+	logger := log.WithField("module", "registry")
+
+	// Set instance identity
+	r.instance = identity.GetWithConfig(cfg.Identity)
 
 	logger.WithFields(log.Fields{
-		"enabled":  enabledCollectors,
+		"enabled":  cfg.EnabledCollectors,
 		"instance": r.instance,
-	}).Info("Reinitializing collectors")
+	}).Infof("%s collectors", action)
 
-	// Create module config loader with pipe mode: content -> env
+	// Create config loader: content -> env (priority: defaults < content < env)
 	configLoader := config.NewWrapConfigLoader()
-
-	// Add content loader if config content is provided
-	if len(configContent) > 0 {
-		configLoader.Add(config.NewModuleConfigLoader(configContent))
+	if len(cfg.ConfigContent) > 0 {
+		configLoader.Add(config.NewModuleConfigLoader(cfg.ConfigContent))
 	}
 
-	// Always add env loader (highest priority)
 	configLoader.Add(config.NewEnvConfigLoader())
 
-	// Create base logger
-	baseLogger := log.WithField("module", "registry")
-
-	for _, name := range enabledCollectors {
+	// Create collectors from factories
+	for _, name := range cfg.EnabledCollectors {
 		factory, exists := r.factories[name]
 		if !exists {
 			logger.Warnf("Collector factory not found: %s", name)
 			continue
 		}
 
-		// Create collector-specific logger with collector name field
-		collectorLogger := baseLogger.WithField("collector", name)
-
-		// Create FactoryContext with collector-specific logger
 		factoryCtx := &collector.FactoryContext{
-			Ctx:                  ctx,
-			RestConfig:           restConfig,
-			Client:               client,
+			Ctx:                  cfg.Ctx,
+			RestConfig:           cfg.RestConfig,
+			Client:               cfg.Client,
 			ConfigLoader:         configLoader,
-			MetricsNamespace:     metricsNamespace,
-			InformerResyncPeriod: informerResyncPeriod,
-			Logger:               collectorLogger,
+			MetricsNamespace:     cfg.MetricsNamespace,
+			InformerResyncPeriod: cfg.InformerResyncPeriod,
+			Logger:               logger.WithField("collector", name),
 		}
 
 		c, err := factory(factoryCtx)
@@ -244,12 +181,8 @@ func (r *Registry) Reinitialize(
 		logger.WithFields(log.Fields{
 			"name": name,
 			"type": c.Type(),
-		}).Info("Collector reinitialized")
+		}).Info("Collector created")
 	}
-
-	logger.Info("Collector reinitialization complete")
-
-	return nil
 }
 
 // Start starts all registered collectors
@@ -397,7 +330,6 @@ type collectorResult struct {
 // This allows all collectors to be registered with a single Prometheus registry.
 type PrometheusCollector struct {
 	registry *Registry
-	instance string
 
 	// Duration metrics
 	collectorDuration *prometheus.Desc
@@ -406,13 +338,8 @@ type PrometheusCollector struct {
 
 // NewPrometheusCollector creates a new PrometheusCollector
 func NewPrometheusCollector(registry *Registry) *PrometheusCollector {
-	registry.mu.RLock()
-	instance := registry.instance
-	registry.mu.RUnlock()
-
 	return &PrometheusCollector{
 		registry: registry,
-		instance: instance,
 		collectorDuration: prometheus.NewDesc(
 			"sealos_state_metric_collector_duration_seconds",
 			"Duration of collector scrape in seconds",
@@ -428,28 +355,42 @@ func NewPrometheusCollector(registry *Registry) *PrometheusCollector {
 	}
 }
 
+// getInstance returns the current instance identity from the registry
+// This is called on each collect to ensure the instance is always up-to-date after reloads
+func (pc *PrometheusCollector) getInstance() string {
+	pc.registry.mu.RLock()
+	defer pc.registry.mu.RUnlock()
+	return pc.registry.instance
+}
+
 // Describe implements prometheus.Collector
 func (pc *PrometheusCollector) Describe(ch chan<- *prometheus.Desc) {
 	pc.registry.mu.RLock()
+
 	collectors := make([]collector.Collector, 0, len(pc.registry.collectors))
 	for _, c := range pc.registry.collectors {
 		collectors = append(collectors, c)
 	}
+
 	pc.registry.mu.RUnlock()
 
 	// Describe our own metrics
 	ch <- pc.collectorDuration
+
 	ch <- pc.collectorSuccess
 
 	// Describe all collectors concurrently
 	var wg sync.WaitGroup
 	for _, c := range collectors {
 		wg.Add(1)
+
 		go func(col collector.Collector) {
 			defer wg.Done()
+
 			col.Describe(ch)
 		}(c)
 	}
+
 	wg.Wait()
 }
 
@@ -471,6 +412,7 @@ func collectFromCollector(
 					"collector": name,
 					"panic":     r,
 				}).Error("Collector panicked during collection")
+
 				success = false
 			}
 		}()
@@ -500,25 +442,27 @@ func (pc *PrometheusCollector) emitCollectorMetrics(
 	results []collectorResult,
 	ch chan<- prometheus.Metric,
 ) {
+	instance := pc.getInstance()
 	for _, result := range results {
 		ch <- prometheus.MustNewConstMetric(
 			pc.collectorDuration,
 			prometheus.GaugeValue,
 			result.duration.Seconds(),
 			result.name,
-			pc.instance,
+			instance,
 		)
 
 		successValue := 0.0
 		if result.success {
 			successValue = 1.0
 		}
+
 		ch <- prometheus.MustNewConstMetric(
 			pc.collectorSuccess,
 			prometheus.GaugeValue,
 			successValue,
 			result.name,
-			pc.instance,
+			instance,
 		)
 	}
 }
@@ -527,22 +471,25 @@ func (pc *PrometheusCollector) emitCollectorMetrics(
 func (pc *PrometheusCollector) Collect(ch chan<- prometheus.Metric) {
 	// Copy collectors map to reduce lock contention
 	pc.registry.mu.RLock()
+
 	collectors := make(map[string]collector.Collector, len(pc.registry.collectors))
-	for name, c := range pc.registry.collectors {
-		collectors[name] = c
-	}
+	maps.Copy(collectors, pc.registry.collectors)
+
 	pc.registry.mu.RUnlock()
 
 	logger := log.WithField("module", "registry")
 
 	// Collect from all collectors concurrently
 	var wg sync.WaitGroup
+
 	resultCh := make(chan collectorResult, len(collectors))
 
 	for name, c := range collectors {
 		wg.Add(1)
+
 		go func(collectorName string, col collector.Collector) {
 			defer wg.Done()
+
 			result := collectFromCollector(collectorName, col, ch, logger)
 			resultCh <- result
 		}(name, c)

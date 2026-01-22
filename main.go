@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 
-	"github.com/alecthomas/kong"
 	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/app"
 	_ "github.com/zijiren233/sealos-state-metric/pkg/collector/all" // Import all collectors
@@ -13,38 +12,20 @@ import (
 )
 
 func main() {
-	// Parse command-line flags with kong
-	cfg := &config.GlobalConfig{}
-	ctx := kong.Parse(cfg,
-		kong.Name("sealos-state-metric"),
-		kong.Description("Sealos state metrics collector for Kubernetes"),
-		kong.UsageOnError(),
-	)
+	// Store CLI args for config reload (skip program name)
+	cliArgs := os.Args[1:]
 
-	// Load from .env file if specified
-	if cfg.EnvFile != "" {
-		if err := config.LoadEnvFile(cfg.EnvFile); err != nil {
-			log.WithError(err).Debug("No .env file loaded")
-		} else {
-			log.WithField("file", cfg.EnvFile).Info("Loaded environment from .env file")
-		}
-	}
-
-	// Load configuration from YAML if specified
-	if cfg.ConfigPath != "" {
-		if err := config.LoadFromYAML(cfg.ConfigPath, cfg); err != nil {
-			ctx.Fatalf("Failed to load config from YAML: %v", err)
-		}
-	}
-
-	// Parse environment variables (will fill in any missing values)
-	if err := config.ParseEnv(cfg); err != nil {
-		ctx.Fatalf("Failed to parse environment variables: %v", err)
+	// Load configuration: CLI args (defaults) → YAML → env vars
+	cfg, err := config.LoadGlobalConfig(config.LoadOptions{
+		Args: cliArgs,
+	})
+	if err != nil {
+		log.WithError(err).Fatal("Failed to load configuration")
 	}
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
-		ctx.Fatalf("Configuration validation failed: %v", err)
+		log.WithError(err).Fatal("Configuration validation failed")
 	}
 
 	// Initialize logger
@@ -60,19 +41,77 @@ func main() {
 		"metricsAddress": cfg.Server.Address,
 	}).Info("Configuration loaded")
 
-	// Create and run server
-	appCtx := context.Background()
-
-	server, err := app.NewServer(cfg, cfg.ConfigPath)
-	if err != nil {
-		log.WithError(err).Error("Failed to create server")
-		os.Exit(1)
+	// Read config file content if provided
+	var configContent []byte
+	if cfg.ConfigPath != "" {
+		configContent, err = os.ReadFile(cfg.ConfigPath)
+		if err != nil {
+			log.WithError(err).Fatal("Failed to read config file")
+		}
 	}
 
-	if err := server.Run(appCtx); err != nil {
-		log.WithError(err).Error("Server exited with error")
-		os.Exit(1)
+	// Create server
+	server := app.NewServer(cfg, configContent)
+
+	// Setup config reloader if config path is provided
+	var reloader *config.Reloader
+	if cfg.ConfigPath != "" {
+		reloader, err = config.NewReloader(cfg.ConfigPath, func(newConfigContent []byte) error {
+			return handleReload(cliArgs, newConfigContent, server)
+		})
+		if err != nil {
+			log.WithError(err).Fatal("Failed to create config reloader")
+		}
+	}
+
+	// Run server
+	ctx := context.Background()
+
+	if reloader != nil {
+		if err := reloader.Start(ctx); err != nil {
+			log.WithError(err).Fatal("Failed to start config reloader")
+		}
+		defer func() {
+			if err := reloader.Stop(); err != nil {
+				log.WithError(err).Error("Failed to stop config reloader")
+			}
+		}()
+
+		log.WithField("config_path", cfg.ConfigPath).Info("Configuration hot reload enabled")
+	}
+
+	if err := server.Run(ctx); err != nil {
+		log.WithError(err).Fatal("Server exited with error")
 	}
 
 	log.Info("Server exited successfully")
+}
+
+// handleReload handles configuration reload for both logger and server
+func handleReload(cliArgs []string, newConfigContent []byte, server *app.Server) error {
+	// Load new configuration
+	newConfig, err := config.LoadGlobalConfig(config.LoadOptions{
+		Args:          cliArgs,
+		ConfigContent: newConfigContent,
+	})
+	if err != nil {
+		return err
+	}
+
+	// Validate new configuration
+	if err := newConfig.Validate(); err != nil {
+		return err
+	}
+
+	// Reload logger first
+	logger.InitLog(
+		logger.WithDebug(newConfig.Logging.Debug),
+		logger.WithLevel(newConfig.Logging.Level),
+		logger.WithFormat(newConfig.Logging.Format),
+	)
+
+	log.Info("Logger reloaded")
+
+	// Reload server
+	return server.Reload(newConfigContent, newConfig)
 }

@@ -1,7 +1,6 @@
-package identity
+package identity //nolint:testpackage // Need to test unexported generateRandomID
 
 import (
-	"os"
 	"testing"
 )
 
@@ -10,8 +9,7 @@ func TestGet(t *testing.T) {
 	Reset()
 
 	// Test with POD_NAME env var
-	os.Setenv("POD_NAME", "test-pod-123")
-	defer os.Unsetenv("POD_NAME")
+	t.Setenv("POD_NAME", "test-pod-123")
 
 	id1 := Get()
 	if id1 != "test-pod-123" {
@@ -19,7 +17,8 @@ func TestGet(t *testing.T) {
 	}
 
 	// Verify it's cached (should return same value even after changing env)
-	os.Setenv("POD_NAME", "different-pod")
+	t.Setenv("POD_NAME", "different-pod")
+
 	id2 := Get()
 	if id2 != "test-pod-123" {
 		t.Errorf("Expected cached 'test-pod-123', got '%s'", id2)
@@ -29,8 +28,7 @@ func TestGet(t *testing.T) {
 func TestGetWithConfig(t *testing.T) {
 	Reset()
 
-	os.Setenv("POD_NAME", "test-pod-456")
-	defer os.Unsetenv("POD_NAME")
+	t.Setenv("POD_NAME", "test-pod-456")
 
 	// Test with explicit config
 	id := GetWithConfig("explicit-config")
@@ -48,8 +46,8 @@ func TestGetWithConfig(t *testing.T) {
 func TestGetFallbackPriority(t *testing.T) {
 	Reset()
 
-	// Unset POD_NAME to test fallback priority: IP -> hostname -> random
-	os.Unsetenv("POD_NAME")
+	// Set POD_NAME to empty to test fallback priority: IP -> hostname -> random
+	t.Setenv("POD_NAME", "")
 
 	id := Get()
 
@@ -65,8 +63,7 @@ func TestGetFallbackPriority(t *testing.T) {
 func TestReset(t *testing.T) {
 	Reset()
 
-	os.Setenv("POD_NAME", "first-pod")
-	defer os.Unsetenv("POD_NAME")
+	t.Setenv("POD_NAME", "first-pod")
 
 	id1 := Get()
 	if id1 != "first-pod" {
@@ -75,7 +72,7 @@ func TestReset(t *testing.T) {
 
 	// Reset and change env
 	Reset()
-	os.Setenv("POD_NAME", "second-pod")
+	t.Setenv("POD_NAME", "second-pod")
 
 	id2 := Get()
 	if id2 != "second-pod" {
@@ -87,7 +84,7 @@ func TestComputeFallback(t *testing.T) {
 	// Test that compute returns a non-empty string
 	// It should try POD_NAME -> hostname -> IP -> random
 	Reset()
-	os.Unsetenv("POD_NAME")
+	t.Setenv("POD_NAME", "")
 
 	id := Get()
 	if id == "" {
