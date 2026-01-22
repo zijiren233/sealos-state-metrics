@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
+	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector"
-	"k8s.io/klog/v2"
 )
 
 // BaseCollector provides common functionality for all collectors.
@@ -17,36 +17,49 @@ type BaseCollector struct {
 	name                   string
 	collectorType          collector.CollectorType
 	requiresLeaderElection bool
+	logger                 *log.Entry
 
-	mu            sync.RWMutex
-	started       atomic.Bool
-	ctx           context.Context
-	cancel        context.CancelFunc
+	mu      sync.RWMutex
+	started atomic.Bool
+	//nolint:containedctx // Context is intentionally stored to manage collector lifecycle between Start/Stop
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// Metrics registry
-	descs         []*prometheus.Desc
+	descs []*prometheus.Desc
 
 	// Collector-specific collect function
-	collectFunc   func(ch chan<- prometheus.Metric)
+	collectFunc func(ch chan<- prometheus.Metric)
 }
 
 // NewBaseCollector creates a new BaseCollector instance.
 // By default, collectors require leader election (requiresLeaderElection = true).
-func NewBaseCollector(name string, collectorType collector.CollectorType) *BaseCollector {
+func NewBaseCollector(
+	name string,
+	collectorType collector.CollectorType,
+	logger *log.Entry,
+) *BaseCollector {
 	return &BaseCollector{
 		name:                   name,
 		collectorType:          collectorType,
 		requiresLeaderElection: true, // Default: require leader election
+		logger:                 logger,
 		descs:                  make([]*prometheus.Desc, 0),
 	}
 }
 
 // NewBaseCollectorWithLeaderElection creates a new BaseCollector with custom leader election requirement
-func NewBaseCollectorWithLeaderElection(name string, collectorType collector.CollectorType, requiresLeaderElection bool) *BaseCollector {
+func NewBaseCollectorWithLeaderElection(
+	name string,
+	collectorType collector.CollectorType,
+	requiresLeaderElection bool,
+	logger *log.Entry,
+) *BaseCollector {
 	return &BaseCollector{
 		name:                   name,
 		collectorType:          collectorType,
 		requiresLeaderElection: requiresLeaderElection,
+		logger:                 logger,
 		descs:                  make([]*prometheus.Desc, 0),
 	}
 }
@@ -70,6 +83,7 @@ func (b *BaseCollector) RequiresLeaderElection() bool {
 func (b *BaseCollector) SetRequiresLeaderElection(requires bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.requiresLeaderElection = requires
 }
 
@@ -85,7 +99,11 @@ func (b *BaseCollector) Start(ctx context.Context) error {
 	b.ctx, b.cancel = context.WithCancel(ctx)
 	b.started.Store(true)
 
-	klog.InfoS("Collector started", "name", b.name, "type", b.collectorType)
+	b.logger.WithFields(log.Fields{
+		"name": b.name,
+		"type": b.collectorType,
+	}).Info("Collector started")
+
 	return nil
 }
 
@@ -101,9 +119,11 @@ func (b *BaseCollector) Stop() error {
 	if b.cancel != nil {
 		b.cancel()
 	}
+
 	b.started.Store(false)
 
-	klog.InfoS("Collector stopped", "name", b.name)
+	b.logger.WithField("name", b.name).Info("Collector stopped")
+
 	return nil
 }
 
@@ -144,6 +164,7 @@ func (b *BaseCollector) Health() error {
 func (b *BaseCollector) RegisterDesc(desc *prometheus.Desc) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.descs = append(b.descs, desc)
 }
 
@@ -161,6 +182,7 @@ func (b *BaseCollector) Describe(ch chan<- *prometheus.Desc) {
 func (b *BaseCollector) SetCollectFunc(f func(ch chan<- prometheus.Metric)) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	b.collectFunc = f
 }
 
@@ -179,5 +201,6 @@ func (b *BaseCollector) MustRegisterDesc(desc *prometheus.Desc) {
 	if desc == nil {
 		panic(fmt.Sprintf("collector %s: cannot register nil descriptor", b.name))
 	}
+
 	b.RegisterDesc(desc)
 }

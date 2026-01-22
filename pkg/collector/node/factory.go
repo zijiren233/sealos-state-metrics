@@ -1,13 +1,12 @@
 package node
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/zijiren233/sealos-state-metric/pkg/collector"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	"github.com/zijiren233/sealos-state-metric/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/klog/v2"
 )
 
 const collectorName = "node"
@@ -24,19 +23,25 @@ func NewCollector(factoryCtx *collector.FactoryContext) (collector.Collector, er
 	// 2. Load configuration from ConfigLoader pipe (file -> env)
 	// ConfigLoader is never nil and handles priority: defaults < file < env
 	if err := factoryCtx.ConfigLoader.LoadModuleConfig("collectors.node", cfg); err != nil {
-		klog.V(4).InfoS("Failed to load node collector config, using defaults", "error", err)
+		factoryCtx.Logger.WithError(err).
+			Debug("Failed to load node collector config, using defaults")
 	}
 
 	if !cfg.Enabled {
-		return nil, fmt.Errorf("node collector is not enabled")
+		return nil, errors.New("node collector is not enabled")
 	}
 
 	c := &Collector{
-		BaseCollector: base.NewBaseCollector(collectorName, collector.TypeInformer),
-		client:        factoryCtx.Client,
-		config:        cfg,
-		nodes:         make(map[string]*corev1.Node),
-		stopCh:        make(chan struct{}),
+		BaseCollector: base.NewBaseCollector(
+			collectorName,
+			collector.TypeInformer,
+			factoryCtx.Logger,
+		),
+		client: factoryCtx.Client,
+		config: cfg,
+		nodes:  make(map[string]*corev1.Node),
+		stopCh: make(chan struct{}),
+		logger: factoryCtx.Logger,
 	}
 
 	c.initMetrics(factoryCtx.MetricsNamespace)

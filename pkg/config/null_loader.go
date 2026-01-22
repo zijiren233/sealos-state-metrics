@@ -10,6 +10,6 @@ func NewNullConfigLoader() *NullConfigLoader {
 }
 
 // LoadModuleConfig does nothing and returns nil
-func (l *NullConfigLoader) LoadModuleConfig(moduleKey string, target interface{}) error {
+func (l *NullConfigLoader) LoadModuleConfig(moduleKey string, target any) error {
 	return nil
 }

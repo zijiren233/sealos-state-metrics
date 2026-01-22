@@ -2,17 +2,17 @@ package event
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
 )
 
 // Collector collects event metrics
@@ -25,15 +25,16 @@ type Collector struct {
 	filter     *EventFilter
 	aggregator *EventAggregator
 	stopCh     chan struct{}
+	logger     *log.Entry
 
 	mu     sync.RWMutex
 	events map[string]*corev1.Event // key: namespace/name
 
 	// Metrics
-	eventWarningTotal     *prometheus.Desc
-	eventErrorTotal       *prometheus.Desc
-	eventLastSeenTime     *prometheus.Desc
-	eventUniqueObjects    *prometheus.Desc
+	eventWarningTotal  *prometheus.Desc
+	eventErrorTotal    *prometheus.Desc
+	eventLastSeenTime  *prometheus.Desc
+	eventUniqueObjects *prometheus.Desc
 }
 
 // initMetrics initializes Prometheus metric descriptors
@@ -88,14 +89,16 @@ func (c *Collector) Start(ctx context.Context) error {
 	c.informer = factory.Core().V1().Events().Informer()
 
 	// Add event handlers
+	//nolint:errcheck // AddEventHandler returns (registration, error) but error is always nil in client-go
 	c.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			event := obj.(*corev1.Event)
+		AddFunc: func(obj any) {
+			event := obj.(*corev1.Event) //nolint:errcheck // Type assertion is safe from informer
 			if !c.filter.ShouldInclude(event) {
 				return
 			}
 
 			key := eventKey(event)
+
 			c.mu.Lock()
 			c.events[key] = event.DeepCopy()
 			c.mu.Unlock()
@@ -104,15 +107,20 @@ func (c *Collector) Start(ctx context.Context) error {
 				c.aggregator.AddEvent(event)
 			}
 
-			klog.V(4).InfoS("Event added", "event", key, "reason", event.Reason, "type", event.Type)
+			c.logger.WithFields(log.Fields{
+				"event":  key,
+				"reason": event.Reason,
+				"type":   event.Type,
+			}).Debug("Event added")
 		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			event := newObj.(*corev1.Event)
+		UpdateFunc: func(oldObj, newObj any) {
+			event := newObj.(*corev1.Event) //nolint:errcheck // Type assertion is safe from informer
 			if !c.filter.ShouldInclude(event) {
 				return
 			}
 
 			key := eventKey(event)
+
 			c.mu.Lock()
 			c.events[key] = event.DeepCopy()
 			c.mu.Unlock()
@@ -121,16 +129,21 @@ func (c *Collector) Start(ctx context.Context) error {
 				c.aggregator.AddEvent(event)
 			}
 
-			klog.V(4).InfoS("Event updated", "event", key, "reason", event.Reason, "count", event.Count)
+			c.logger.WithFields(log.Fields{
+				"event":  key,
+				"reason": event.Reason,
+				"count":  event.Count,
+			}).Debug("Event updated")
 		},
-		DeleteFunc: func(obj interface{}) {
-			event := obj.(*corev1.Event)
+		DeleteFunc: func(obj any) {
+			event := obj.(*corev1.Event) //nolint:errcheck // Type assertion is safe from informer
 			key := eventKey(event)
+
 			c.mu.Lock()
 			delete(c.events, key)
 			c.mu.Unlock()
 
-			klog.V(4).InfoS("Event deleted", "event", key)
+			c.logger.WithField("event", key).Debug("Event deleted")
 		},
 	})
 
@@ -138,21 +151,25 @@ func (c *Collector) Start(ctx context.Context) error {
 	factory.Start(c.stopCh)
 
 	// Wait for cache sync
-	klog.InfoS("Waiting for event informer cache sync")
+	c.logger.Info("Waiting for event informer cache sync")
+
 	if !cache.WaitForCacheSync(c.stopCh, c.informer.HasSynced) {
-		return fmt.Errorf("failed to sync event informer cache")
+		return errors.New("failed to sync event informer cache")
 	}
 
-	klog.InfoS("Event collector started successfully")
+	c.logger.Info("Event collector started successfully")
+
 	return nil
 }
 
 // Stop stops the collector
 func (c *Collector) Stop() error {
 	close(c.stopCh)
+
 	if c.aggregator != nil {
 		c.aggregator.Stop()
 	}
+
 	return c.BaseCollector.Stop()
 }
 

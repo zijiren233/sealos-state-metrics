@@ -1,8 +1,8 @@
 package config
 
 import (
+	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector"
-	"k8s.io/klog/v2"
 )
 
 // WrapConfigLoader wraps multiple config loaders in a chain
@@ -28,14 +28,18 @@ func (w *WrapConfigLoader) Add(loader collector.ConfigLoader) *WrapConfigLoader 
 
 // LoadModuleConfig loads configuration from all loaders in the chain
 // Each loader can override values from previous loaders
-func (w *WrapConfigLoader) LoadModuleConfig(moduleKey string, target interface{}) error {
+func (w *WrapConfigLoader) LoadModuleConfig(moduleKey string, target any) error {
 	for i, loader := range w.loaders {
 		if err := loader.LoadModuleConfig(moduleKey, target); err != nil {
-			klog.V(4).InfoS("Loader failed in chain", "index", i, "error", err)
+			log.WithFields(log.Fields{
+				"index": i,
+				"error": err,
+			}).Debug("Loader failed in chain")
 			// Continue with next loader even if one fails
 			continue
 		}
 	}
+
 	return nil
 }
 

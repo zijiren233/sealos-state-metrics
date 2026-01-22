@@ -35,6 +35,7 @@ func buildConfig(kubeconfig string) (*rest.Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to build config from kubeconfig: %w", err)
 		}
+
 		return config, nil
 	}
 

@@ -8,7 +8,7 @@ import (
 
 // EventFilter filters events based on various criteria
 type EventFilter struct {
-	maxAge         time.Duration
+	maxAge           time.Duration
 	blacklistReasons map[string]bool
 }
 
@@ -18,22 +18,22 @@ func NewEventFilter(maxAge time.Duration) *EventFilter {
 		maxAge: maxAge,
 		blacklistReasons: map[string]bool{
 			// Common noisy events that don't indicate issues
-			"SyncKubeConfig":        true,
-			"FailedMount":           true, // Often transient
-			"NodeNotReady":          true, // Redundant with node metrics
-			"NodeReady":             true, // Not an issue
-			"RegisteredNode":        true, // Normal operation
-			"RemovingNode":          true, // Normal operation
-			"DeletingNode":          true, // Normal operation
+			"SyncKubeConfig":          true,
+			"FailedMount":             true, // Often transient
+			"NodeNotReady":            true, // Redundant with node metrics
+			"NodeReady":               true, // Not an issue
+			"RegisteredNode":          true, // Normal operation
+			"RemovingNode":            true, // Normal operation
+			"DeletingNode":            true, // Normal operation
 			"NodeAllocatableEnforced": true, // Normal operation
-			"Starting":              true, // Informational
-			"Pulled":                true, // Success event
-			"Created":               true, // Success event
-			"Started":               true, // Success event
-			"Killing":               true, // Normal operation
-			"NodeHasSufficientDisk": true, // Positive
+			"Starting":                true, // Informational
+			"Pulled":                  true, // Success event
+			"Created":                 true, // Success event
+			"Started":                 true, // Success event
+			"Killing":                 true, // Normal operation
+			"NodeHasSufficientDisk":   true, // Positive
 			"NodeHasSufficientMemory": true, // Positive
-			"NodeHasNoDiskPressure": true, // Positive
+			"NodeHasNoDiskPressure":   true, // Positive
 		},
 	}
 }
@@ -57,11 +57,11 @@ func (f *EventFilter) ShouldInclude(event *corev1.Event) bool {
 	if event.Type != corev1.EventTypeWarning {
 		// Some Normal events that we want to track
 		issueReasons := map[string]bool{
-			"BackOff":           true,
-			"FailedScheduling":  true,
-			"FailedCreate":      true,
-			"FailedDelete":      true,
-			"FailedUpdate":      true,
+			"BackOff":          true,
+			"FailedScheduling": true,
+			"FailedCreate":     true,
+			"FailedDelete":     true,
+			"FailedUpdate":     true,
 		}
 		if !issueReasons[event.Reason] {
 			return false

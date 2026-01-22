@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	log "github.com/sirupsen/logrus"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -76,12 +77,13 @@ type PollingCollector interface {
 
 // ConfigLoader defines the interface for loading module-specific configuration
 type ConfigLoader interface {
-	LoadModuleConfig(moduleKey string, target interface{}) error
+	LoadModuleConfig(moduleKey string, target any) error
 }
 
 // FactoryContext contains context needed for creating collectors
 // Each collector is responsible for loading its own configuration
 type FactoryContext struct {
+	//nolint:containedctx // Context is part of factory parameters struct, passed to factory functions
 	Ctx          context.Context
 	Client       kubernetes.Interface
 	ConfigLoader ConfigLoader // Loader for module-specific configuration (never nil, use NullLoader as fallback)
@@ -89,6 +91,9 @@ type FactoryContext struct {
 	// Global configs that all collectors might need
 	MetricsNamespace     string
 	InformerResyncPeriod time.Duration
+
+	// Logger is the base logger, collectors should use Logger.WithField("collector", name) for component-specific logging
+	Logger *log.Entry
 }
 
 // Factory is a function type that creates a new collector instance.

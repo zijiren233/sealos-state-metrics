@@ -1,8 +1,7 @@
+//nolint:testpackage // Tests require access to internal functions
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -12,18 +11,18 @@ import (
 
 // TestConfig is a test configuration struct
 type TestConfig struct {
-	Enabled       bool          `mapstructure:"enabled" yaml:"enabled"`
-	Count         int           `mapstructure:"count" yaml:"count"`
-	Timeout       time.Duration `mapstructure:"timeout" yaml:"timeout"`
-	Name          string        `mapstructure:"name" yaml:"name"`
-	Tags          []string      `mapstructure:"tags" yaml:"tags"`
-	NestedConfig  NestedConfig  `mapstructure:"nested" yaml:"nested"`
+	Enabled       bool          `mapstructure:"enabled"        yaml:"enabled"`
+	Count         int           `mapstructure:"count"          yaml:"count"`
+	Timeout       time.Duration `mapstructure:"timeout"        yaml:"timeout"`
+	Name          string        `mapstructure:"name"           yaml:"name"`
+	Tags          []string      `mapstructure:"tags"           yaml:"tags"`
+	NestedConfig  NestedConfig  `mapstructure:"nested"         yaml:"nested"`
 	OptionalField string        `mapstructure:"optional_field" yaml:"optional_field"`
 }
 
 type NestedConfig struct {
 	Value string `mapstructure:"value" yaml:"value"`
-	Port  int    `mapstructure:"port" yaml:"port"`
+	Port  int    `mapstructure:"port"  yaml:"port"`
 }
 
 func TestModuleConfigLoader_BasicLoad(t *testing.T) {
@@ -41,14 +40,15 @@ collectors:
       value: nested-value
       port: 8080
 `
+
 	tmpFile := createTempYAML(t, yamlContent)
-	defer os.Remove(tmpFile)
 
 	// Create loader
 	loader := NewModuleConfigLoader(tmpFile)
 
 	// Load config
 	var config TestConfig
+
 	err := loader.LoadModuleConfig("collectors.node", &config)
 	if err != nil {
 		t.Fatalf("LoadModuleConfig failed: %v", err)
@@ -58,18 +58,23 @@ collectors:
 	if !config.Enabled {
 		t.Errorf("Expected Enabled=true, got %v", config.Enabled)
 	}
+
 	if config.Count != 42 {
 		t.Errorf("Expected Count=42, got %d", config.Count)
 	}
+
 	if config.Name != "test-collector" {
 		t.Errorf("Expected Name=test-collector, got %s", config.Name)
 	}
+
 	if len(config.Tags) != 2 || config.Tags[0] != "tag1" || config.Tags[1] != "tag2" {
 		t.Errorf("Expected Tags=[tag1, tag2], got %v", config.Tags)
 	}
+
 	if config.NestedConfig.Value != "nested-value" {
 		t.Errorf("Expected NestedConfig.Value=nested-value, got %s", config.NestedConfig.Value)
 	}
+
 	if config.NestedConfig.Port != 8080 {
 		t.Errorf("Expected NestedConfig.Port=8080, got %d", config.NestedConfig.Port)
 	}
@@ -83,13 +88,14 @@ collectors:
     count: 100
     name: pod-collector
 `
+
 	tmpFile := createTempYAML(t, yamlContent)
-	defer os.Remove(tmpFile)
 
 	// Create loader with yaml tag name
 	loader := NewModuleConfigLoader(tmpFile, WithModuleTagName("yaml"))
 
 	var config TestConfig
+
 	err := loader.LoadModuleConfig("collectors.pod", &config)
 	if err != nil {
 		t.Fatalf("LoadModuleConfig failed: %v", err)
@@ -98,9 +104,11 @@ collectors:
 	if config.Enabled {
 		t.Errorf("Expected Enabled=false, got %v", config.Enabled)
 	}
+
 	if config.Count != 100 {
 		t.Errorf("Expected Count=100, got %d", config.Count)
 	}
+
 	if config.Name != "pod-collector" {
 		t.Errorf("Expected Name=pod-collector, got %s", config.Name)
 	}
@@ -115,14 +123,16 @@ collectors:
     timeout: "10s"
     name: cert-collector
 `
+
 	tmpFile := createTempYAML(t, yamlContent)
-	defer os.Remove(tmpFile)
 
 	// Test with custom decode hook for time.Duration
 	loader := NewModuleConfigLoader(tmpFile, WithModuleDecodeHook(
 		mapstructure.StringToTimeDurationHookFunc(),
 	))
+
 	var config TestConfig
+
 	err := loader.LoadModuleConfig("collectors.cert", &config)
 	if err != nil {
 		t.Fatalf("LoadModuleConfig failed: %v", err)
@@ -131,9 +141,11 @@ collectors:
 	if !config.Enabled {
 		t.Errorf("Expected Enabled=true, got %v", config.Enabled)
 	}
+
 	if config.Count != 50 {
 		t.Errorf("Expected Count=50, got %d", config.Count)
 	}
+
 	if config.Name != "cert-collector" {
 		t.Errorf("Expected Name=cert-collector, got %s", config.Name)
 	}
@@ -151,12 +163,14 @@ collectors:
     count: 100
     name: domain-collector
 `
+
 	tmpFile := createTempYAML(t, yamlContent)
-	defer os.Remove(tmpFile)
 
 	// Test WITHOUT decode hook - only basic types work
 	loader := NewModuleConfigLoader(tmpFile)
+
 	var config TestConfig
+
 	err := loader.LoadModuleConfig("collectors.domain", &config)
 	if err != nil {
 		t.Fatalf("LoadModuleConfig failed: %v", err)
@@ -166,9 +180,11 @@ collectors:
 	if config.Timeout != 0 {
 		t.Errorf("Expected Timeout=0 (not in YAML), got %v", config.Timeout)
 	}
+
 	if config.Count != 100 {
 		t.Errorf("Expected Count=100, got %d", config.Count)
 	}
+
 	if !config.Enabled {
 		t.Errorf("Expected Enabled=true, got %v", config.Enabled)
 	}
@@ -182,13 +198,14 @@ collectors:
     count: "123"
     name: 456
 `
+
 	tmpFile := createTempYAML(t, yamlContent)
-	defer os.Remove(tmpFile)
 
 	// WeaklyTypedInput is enabled by default
 	loader := NewModuleConfigLoader(tmpFile)
 
 	var config TestConfig
+
 	err := loader.LoadModuleConfig("collectors.domain", &config)
 	if err != nil {
 		t.Fatalf("LoadModuleConfig failed: %v", err)
@@ -214,8 +231,8 @@ collectors:
   node:
     enabled: true
 `
+
 	tmpFile := createTempYAML(t, yamlContent)
-	defer os.Remove(tmpFile)
 
 	loader := NewModuleConfigLoader(tmpFile)
 
@@ -230,15 +247,17 @@ collectors:
 	if config.Enabled {
 		t.Errorf("Expected Enabled=false (default), got %v", config.Enabled)
 	}
+
 	if config.Count != 0 {
 		t.Errorf("Expected Count=0 (default), got %d", config.Count)
 	}
 }
 
 func TestModuleConfigLoader_EmptyFile(t *testing.T) {
-	loader := NewModuleConfigLoader("")
+	loader := NewModuleConfigLoader(nil)
 
 	var config TestConfig
+
 	err := loader.LoadModuleConfig("collectors.node", &config)
 	if err != nil {
 		t.Fatalf("LoadModuleConfig should not error on empty file: %v", err)
@@ -250,7 +269,6 @@ func TestModuleConfigLoader_EmptyFile(t *testing.T) {
 	}
 }
 
-
 func TestModuleConfigLoader_NestedPath(t *testing.T) {
 	yamlContent := `
 server:
@@ -260,12 +278,13 @@ server:
         enabled: true
         count: 777
 `
+
 	tmpFile := createTempYAML(t, yamlContent)
-	defer os.Remove(tmpFile)
 
 	loader := NewModuleConfigLoader(tmpFile)
 
 	var config TestConfig
+
 	err := loader.LoadModuleConfig("server.http.collectors.node", &config)
 	if err != nil {
 		t.Fatalf("LoadModuleConfig failed: %v", err)
@@ -274,13 +293,15 @@ server:
 	if !config.Enabled {
 		t.Errorf("Expected Enabled=true, got %v", config.Enabled)
 	}
+
 	if config.Count != 777 {
 		t.Errorf("Expected Count=777, got %d", config.Count)
 	}
 }
 
-
 func TestSplitKey(t *testing.T) {
+	t.Helper()
+
 	tests := []struct {
 		input    string
 		expected []string
@@ -302,15 +323,8 @@ func TestSplitKey(t *testing.T) {
 	}
 }
 
-// Helper function to create a temporary YAML file
-func createTempYAML(t *testing.T, content string) string {
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "config.yaml")
-
-	err := os.WriteFile(tmpFile, []byte(content), 0644)
-	if err != nil {
-		t.Fatalf("Failed to create temp file: %v", err)
-	}
-
-	return tmpFile
+// Helper function to create YAML content bytes
+func createTempYAML(t *testing.T, content string) []byte {
+	t.Helper()
+	return []byte(content)
 }

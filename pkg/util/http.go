@@ -3,7 +3,9 @@ package util
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 )
@@ -23,12 +25,14 @@ func CheckHTTP(ctx context.Context, url string, timeout time.Duration) *HTTPChec
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: false,
+				MinVersion:         tls.VersionTLS12,
 			},
 		},
 	}
 
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return &HTTPCheckResult{
 			Success: false,
@@ -46,6 +50,67 @@ func CheckHTTP(ctx context.Context, url string, timeout time.Duration) *HTTPChec
 			Error:        fmt.Sprintf("request failed: %v", err),
 		}
 	}
+
+	defer resp.Body.Close()
+
+	return &HTTPCheckResult{
+		Success:      resp.StatusCode >= 200 && resp.StatusCode < 500,
+		ResponseTime: responseTime,
+		StatusCode:   resp.StatusCode,
+	}
+}
+
+// CheckHTTPWithIP performs an HTTP/HTTPS health check to a specific IP address
+func CheckHTTPWithIP(
+	ctx context.Context,
+	domain, ip string,
+	timeout time.Duration,
+) *HTTPCheckResult {
+	// Create a transport that dials the specific IP
+	client := &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				// Override the address with our specific IP
+				return (&net.Dialer{
+					Timeout: 15 * time.Second,
+				}).DialContext(ctx, network, net.JoinHostPort(ip, "443"))
+			},
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: false,
+				MinVersion:         tls.VersionTLS12,
+				ServerName:         domain, // Important: use domain for SNI
+			},
+		},
+	}
+
+	start := time.Now()
+
+	// Build URL with domain (not IP)
+	url := "https://" + domain + "/"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return &HTTPCheckResult{
+			Success: false,
+			Error:   fmt.Sprintf("failed to create request: %v", err),
+		}
+	}
+
+	// Set Host header to domain
+	req.Host = domain
+
+	resp, err := client.Do(req)
+	responseTime := time.Since(start)
+
+	if err != nil {
+		return &HTTPCheckResult{
+			Success:      false,
+			ResponseTime: responseTime,
+			Error:        fmt.Sprintf("request failed: %v", err),
+		}
+	}
+
 	defer resp.Body.Close()
 
 	return &HTTPCheckResult{
@@ -60,6 +125,7 @@ func GetTLSCert(domain string, timeout time.Duration) (*CertInfo, error) {
 	dialer := &tls.Dialer{
 		Config: &tls.Config{
 			InsecureSkipVerify: false,
+			MinVersion:         tls.VersionTLS12,
 		},
 	}
 
@@ -74,12 +140,12 @@ func GetTLSCert(domain string, timeout time.Duration) (*CertInfo, error) {
 
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
-		return nil, fmt.Errorf("not a TLS connection")
+		return nil, errors.New("not a TLS connection")
 	}
 
 	state := tlsConn.ConnectionState()
 	if len(state.PeerCertificates) == 0 {
-		return nil, fmt.Errorf("no certificates found")
+		return nil, errors.New("no certificates found")
 	}
 
 	cert := state.PeerCertificates[0]

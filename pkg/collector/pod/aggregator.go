@@ -1,20 +1,21 @@
 package pod
 
 import (
+	"maps"
 	"sync"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/klog/v2"
 )
 
 // AggregatedPod represents aggregated pod information
 type AggregatedPod struct {
-	Namespace  string
-	Phase      corev1.PodPhase
-	Count      int
-	LastSeen   time.Time
-	Pods       map[string]bool // pod names
+	Namespace string
+	Phase     corev1.PodPhase
+	Count     int
+	LastSeen  time.Time
+	Pods      map[string]bool // pod names
 }
 
 // PodAggregator aggregates similar pods to reduce metric cardinality
@@ -24,28 +25,31 @@ type PodAggregator struct {
 	aggregated   map[string]*AggregatedPod // key: namespace/phase
 	abnormalPods map[string]time.Time      // key: namespace/pod, value: first seen time
 	stopCh       chan struct{}
+	logger       *log.Entry
 }
 
 // NewPodAggregator creates a new pod aggregator
-func NewPodAggregator(windowSize time.Duration) *PodAggregator {
+func NewPodAggregator(windowSize time.Duration, logger *log.Entry) *PodAggregator {
 	return &PodAggregator{
 		windowSize:   windowSize,
 		aggregated:   make(map[string]*AggregatedPod),
 		abnormalPods: make(map[string]time.Time),
 		stopCh:       make(chan struct{}),
+		logger:       logger,
 	}
 }
 
 // Start starts the aggregator cleanup goroutine
 func (a *PodAggregator) Start() {
 	go a.cleanupLoop()
-	klog.V(4).InfoS("Pod aggregator started", "windowSize", a.windowSize)
+
+	a.logger.WithField("windowSize", a.windowSize).Debug("Pod aggregator started")
 }
 
 // Stop stops the aggregator
 func (a *PodAggregator) Stop() {
 	close(a.stopCh)
-	klog.V(4).Info("Pod aggregator stopped")
+	a.logger.Debug("Pod aggregator stopped")
 }
 
 // AddPod adds a pod to the aggregator
@@ -95,6 +99,7 @@ func (a *PodAggregator) RemovePod(pod *corev1.Pod) {
 	key := podAggregationKey(pod)
 	if agg, exists := a.aggregated[key]; exists {
 		delete(agg.Pods, pod.Name)
+
 		agg.Count = len(agg.Pods)
 		if agg.Count == 0 {
 			delete(a.aggregated, key)
@@ -112,9 +117,8 @@ func (a *PodAggregator) GetAggregated() map[string]*AggregatedPod {
 	defer a.mu.RUnlock()
 
 	result := make(map[string]*AggregatedPod, len(a.aggregated))
-	for k, v := range a.aggregated {
-		result[k] = v
-	}
+	maps.Copy(result, a.aggregated)
+
 	return result
 }
 
@@ -127,6 +131,7 @@ func (a *PodAggregator) GetAbnormalDuration(namespace, podName string) time.Dura
 	if firstSeen, exists := a.abnormalPods[key]; exists {
 		return time.Since(firstSeen)
 	}
+
 	return 0
 }
 
@@ -157,7 +162,7 @@ func (a *PodAggregator) cleanup() {
 	for key, agg := range a.aggregated {
 		if agg.LastSeen.Before(threshold) {
 			delete(a.aggregated, key)
-			klog.V(4).InfoS("Cleaned up aggregated pod entry", "key", key)
+			a.logger.WithField("key", key).Debug("Cleaned up aggregated pod entry")
 		}
 	}
 }
@@ -191,5 +196,6 @@ func isPodAbnormal(pod *corev1.Pod) bool {
 			}
 		}
 	}
+
 	return false
 }

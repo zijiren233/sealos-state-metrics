@@ -12,44 +12,55 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/pkg/config"
 	"github.com/zijiren233/sealos-state-metric/pkg/leaderelection"
 	"github.com/zijiren233/sealos-state-metric/pkg/registry"
 	"github.com/zijiren233/sealos-state-metric/pkg/util"
-	"k8s.io/klog/v2"
-)
-
-var (
-	// Version information, set by build flags
-	Version   = "dev"
-	GitCommit = "unknown"
-	BuildDate = "unknown"
 )
 
 // Server represents the HTTP server
 type Server struct {
-	config         *config.GlobalConfig
-	configFile     string
-	httpServer     *http.Server
-	registry       *registry.Registry
-	promRegistry   *prometheus.Registry
-	leaderElector  *leaderelection.LeaderElector
+	config        *config.GlobalConfig
+	configContent []byte
+	httpServer    *http.Server
+	registry      *registry.Registry
+	promRegistry  *prometheus.Registry
+	leaderElector *leaderelection.LeaderElector
 }
 
 // NewServer creates a new server instance
 func NewServer(cfg *config.GlobalConfig, configFile string) (*Server, error) {
+	var (
+		configContent []byte
+		err           error
+	)
+
+	// Read config file content if provided
+
+	if configFile != "" {
+		configContent, err = os.ReadFile(configFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read config file: %w", err)
+		}
+	}
+
 	return &Server{
-		config:       cfg,
-		configFile:   configFile,
-		registry:     registry.GetRegistry(),
-		promRegistry: prometheus.NewRegistry(),
+		config:        cfg,
+		configContent: configContent,
+		registry:      registry.GetRegistry(),
+		promRegistry:  prometheus.NewRegistry(),
 	}, nil
 }
 
 // Run starts the server and blocks until it receives a shutdown signal
 func (s *Server) Run(ctx context.Context) error {
 	// Create Kubernetes client
-	client, err := util.NewKubernetesClient(s.config.Kubernetes.Kubeconfig, s.config.Kubernetes.QPS, s.config.Kubernetes.Burst)
+	client, err := util.NewKubernetesClient(
+		s.config.Kubernetes.Kubeconfig,
+		s.config.Kubernetes.QPS,
+		s.config.Kubernetes.Burst,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
@@ -58,7 +69,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.registry.Initialize(
 		ctx,
 		client,
-		s.configFile,
+		s.configContent,
 		s.config.Metrics.Namespace,
 		s.config.Performance.InformerResyncPeriod,
 		s.config.EnabledCollectors,
@@ -71,16 +82,18 @@ func (s *Server) Run(ctx context.Context) error {
 	s.promRegistry.MustRegister(promCollector)
 
 	// Always start collectors that don't require leader election
-	klog.Info("Starting collectors that don't require leader election")
+	log.Info("Starting collectors that don't require leader election")
 	// Get all collectors
 	allCollectors := s.registry.ListCollectors()
 	for _, name := range allCollectors {
 		if c, ok := s.registry.GetCollector(name); ok {
 			if !c.RequiresLeaderElection() {
 				if err := c.Start(ctx); err != nil {
-					klog.ErrorS(err, "Failed to start non-leader collector", "name", name)
+					log.WithError(err).
+						WithField("name", name).
+						Error("Failed to start non-leader collector")
 				} else {
-					klog.InfoS("Non-leader collector started", "name", name)
+					log.WithField("name", name).Info("Non-leader collector started")
 				}
 			}
 		}
@@ -91,13 +104,14 @@ func (s *Server) Run(ctx context.Context) error {
 		leConfig := &leaderelection.Config{
 			Namespace:     s.config.LeaderElection.Namespace,
 			LeaseName:     s.config.LeaderElection.LeaseName,
-			Identity:      "", // Will be auto-detected
 			LeaseDuration: s.config.LeaderElection.LeaseDuration,
 			RenewDeadline: s.config.LeaderElection.RenewDeadline,
 			RetryPeriod:   s.config.LeaderElection.RetryPeriod,
 		}
 
-		elector, err := leaderelection.NewLeaderElector(leConfig, client)
+		leLogger := log.WithField("component", "leader-election")
+
+		elector, err := leaderelection.NewLeaderElector(leConfig, client, leLogger)
 		if err != nil {
 			return fmt.Errorf("failed to create leader elector: %w", err)
 		}
@@ -106,21 +120,23 @@ func (s *Server) Run(ctx context.Context) error {
 		elector.SetCallbacks(
 			func(ctx context.Context) {
 				// OnStartedLeading: start collectors that require leader election
-				klog.Info("Became leader, starting leader-required collectors")
+				log.Info("Became leader, starting leader-required collectors")
+
 				if err := s.registry.StartWithLeaderElection(ctx, true); err != nil {
-					klog.ErrorS(err, "Failed to start leader-required collectors")
+					log.WithError(err).Error("Failed to start leader-required collectors")
 				}
 			},
 			func() {
 				// OnStoppedLeading: stop collectors that require leader election
-				klog.Info("Lost leadership, stopping leader-required collectors")
+				log.Info("Lost leadership, stopping leader-required collectors")
+
 				if err := s.registry.StopWithLeaderElection(true); err != nil {
-					klog.ErrorS(err, "Failed to stop leader-required collectors")
+					log.WithError(err).Error("Failed to stop leader-required collectors")
 				}
 			},
 			func(identity string) {
 				// OnNewLeader: log new leader
-				klog.InfoS("New leader elected", "leader", identity)
+				log.WithField("leader", identity).Info("New leader elected")
 			},
 		)
 
@@ -128,14 +144,16 @@ func (s *Server) Run(ctx context.Context) error {
 
 		// Run leader election in background
 		go func() {
-			klog.Info("Starting leader election")
+			log.Info("Starting leader election")
+
 			if err := elector.Run(ctx); err != nil {
-				klog.ErrorS(err, "Leader election exited with error")
+				log.WithError(err).Error("Leader election exited with error")
 			}
 		}()
 	} else {
 		// Start all collectors directly if leader election is disabled
-		klog.Info("Leader election disabled, starting all collectors")
+		log.Info("Leader election disabled, starting all collectors")
+
 		if err := s.registry.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start collectors: %w", err)
 		}
@@ -146,14 +164,16 @@ func (s *Server) Run(ctx context.Context) error {
 	s.setupRoutes(mux)
 
 	s.httpServer = &http.Server{
-		Addr:    s.config.Server.Address,
-		Handler: mux,
+		Addr:              s.config.Server.Address,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	// Start HTTP server in background
 	errChan := make(chan error, 1)
 	go func() {
-		klog.InfoS("Starting HTTP server", "address", s.config.Server.Address)
+		log.WithField("address", s.config.Server.Address).Info("Starting HTTP server")
+
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- fmt.Errorf("HTTP server error: %w", err)
 		}
@@ -167,9 +187,9 @@ func (s *Server) Run(ctx context.Context) error {
 	case err := <-errChan:
 		return err
 	case sig := <-sigChan:
-		klog.InfoS("Received shutdown signal", "signal", sig.String())
+		log.WithField("signal", sig.String()).Info("Received shutdown signal")
 	case <-ctx.Done():
-		klog.Info("Context cancelled, shutting down")
+		log.Info("Context cancelled, shutting down")
 	}
 
 	return s.Shutdown()
@@ -177,11 +197,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown() error {
-	klog.Info("Shutting down server")
+	log.Info("Shutting down server")
 
 	// Stop collectors
 	if err := s.registry.Stop(); err != nil {
-		klog.ErrorS(err, "Failed to stop collectors")
+		log.WithError(err).Error("Failed to stop collectors")
 	}
 
 	// Shutdown HTTP server with timeout
@@ -192,7 +212,8 @@ func (s *Server) Shutdown() error {
 		return fmt.Errorf("failed to shutdown HTTP server: %w", err)
 	}
 
-	klog.Info("Server shutdown complete")
+	log.Info("Server shutdown complete")
+
 	return nil
 }
 
@@ -208,9 +229,6 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 
 	// Health endpoint
 	mux.HandleFunc(s.config.Server.HealthPath, s.handleHealth)
-
-	// Version endpoint
-	mux.HandleFunc("/version", s.handleVersion)
 
 	// Collectors list endpoint
 	mux.HandleFunc("/collectors", s.handleCollectors)
@@ -242,22 +260,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":     allHealthy,
 		"collectors": healthStatus,
 	}
 
-	json.NewEncoder(w).Encode(response)
-}
-
-// handleVersion handles version requests
-func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"version":   Version,
-		"gitCommit": GitCommit,
-		"buildDate": BuildDate,
-	})
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.WithError(err).Error("Failed to encode health response")
+	}
 }
 
 // handleCollectors handles collector list requests
@@ -265,15 +275,18 @@ func (s *Server) handleCollectors(w http.ResponseWriter, r *http.Request) {
 	collectors := s.registry.ListCollectors()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"collectors": collectors,
 		"count":      len(collectors),
-	})
+	}); err != nil {
+		log.WithError(err).Error("Failed to encode collectors response")
+	}
 }
 
 // handleLeader handles leader election status requests
 func (s *Server) handleLeader(w http.ResponseWriter, r *http.Request) {
-	response := map[string]interface{}{
+	response := map[string]any{
 		"enabled": s.config.LeaderElection.Enabled,
 	}
 
@@ -287,7 +300,10 @@ func (s *Server) handleLeader(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.WithError(err).Error("Failed to encode leader response")
+	}
 }
 
 // handleRoot handles root requests
@@ -317,15 +333,9 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	<div>
 		<a href="%s">Metrics</a>
 		<a href="%s">Health</a>
-		<a href="/version">Version</a>
 		<a href="/collectors">Collectors</a>
-	</div>
-	<div class="info">
-		<strong>Version:</strong> %s<br>
-		<strong>Git Commit:</strong> %s<br>
-		<strong>Build Date:</strong> %s
 	</div>
 </body>
 </html>
-`, s.config.Server.MetricsPath, s.config.Server.HealthPath, Version, GitCommit, BuildDate)
+`, s.config.Server.MetricsPath, s.config.Server.HealthPath)
 }

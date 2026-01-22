@@ -99,21 +99,27 @@ func (c *FailureClassifier) Classify(reason, message string) FailureReason {
 		if matchesAny(text, imageNotFoundPatterns) {
 			return FailureReasonImageNotFound
 		}
+
 		if matchesAny(text, manifestNotFoundPatterns) {
 			return FailureReasonManifestNotFound
 		}
+
 		if matchesAny(text, unauthorizedPatterns) {
 			return FailureReasonUnauthorized
 		}
+
 		if matchesAny(text, registryUnavailablePatterns) {
 			return FailureReasonRegistryUnavailable
 		}
+
 		if matchesAny(text, timeoutPatterns) {
 			return FailureReasonTimeout
 		}
+
 		if matchesAny(text, networkErrorPatterns) {
 			return FailureReasonNetworkError
 		}
+
 		return FailureReasonBackOff
 	case "ImageInspectError":
 		return FailureReasonImageNotFound
@@ -123,18 +129,23 @@ func (c *FailureClassifier) Classify(reason, message string) FailureReason {
 	if matchesAny(text, imageNotFoundPatterns) {
 		return FailureReasonImageNotFound
 	}
+
 	if matchesAny(text, manifestNotFoundPatterns) {
 		return FailureReasonManifestNotFound
 	}
+
 	if matchesAny(text, unauthorizedPatterns) {
 		return FailureReasonUnauthorized
 	}
+
 	if matchesAny(text, registryUnavailablePatterns) {
 		return FailureReasonRegistryUnavailable
 	}
+
 	if matchesAny(text, timeoutPatterns) {
 		return FailureReasonTimeout
 	}
+
 	if matchesAny(text, networkErrorPatterns) {
 		return FailureReasonNetworkError
 	}
@@ -154,5 +165,6 @@ func matchesAny(text string, patterns []*regexp.Regexp) bool {
 			return true
 		}
 	}
+
 	return false
 }

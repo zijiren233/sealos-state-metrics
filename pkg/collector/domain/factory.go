@@ -1,12 +1,11 @@
 package domain
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/zijiren233/sealos-state-metric/pkg/collector"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	"github.com/zijiren233/sealos-state-metric/pkg/registry"
-	"k8s.io/klog/v2"
 )
 
 const collectorName = "domain"
@@ -23,26 +22,31 @@ func NewCollector(factoryCtx *collector.FactoryContext) (collector.Collector, er
 	// 2. Load configuration from ConfigLoader pipe (file -> env)
 	// ConfigLoader is never nil and handles priority: defaults < file < env
 	if err := factoryCtx.ConfigLoader.LoadModuleConfig("collectors.domain", cfg); err != nil {
-		klog.V(4).InfoS("Failed to load domain collector config, using defaults", "error", err)
+		factoryCtx.Logger.WithError(err).
+			Debug("Failed to load domain collector config, using defaults")
 	}
 
 	if !cfg.Enabled {
-		return nil, fmt.Errorf("domain collector is not enabled")
+		return nil, errors.New("domain collector is not enabled")
 	}
 
 	c := &Collector{
-		BaseCollector: base.NewBaseCollector(collectorName, collector.TypePolling),
-		client:        factoryCtx.Client,
-		config:        cfg,
-		domains:       make(map[string]*DomainHealth),
-		stopCh:        make(chan struct{}),
+		BaseCollector: base.NewBaseCollector(
+			collectorName,
+			collector.TypePolling,
+			factoryCtx.Logger,
+		),
+		config: cfg,
+		ips:    make(map[string]*IPHealth),
+		stopCh: make(chan struct{}),
+		logger: factoryCtx.Logger,
 	}
 
 	// Create checker
 	c.checker = NewDomainChecker(
 		cfg.CheckTimeout,
 		cfg.IncludeHTTPCheck,
-		cfg.IncludeIPCheck,
+		true, // checkDNS is always true as we need IPs
 		cfg.IncludeCertCheck,
 	)
 

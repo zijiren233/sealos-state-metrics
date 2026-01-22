@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/caarlos0/env/v9"
-	"k8s.io/klog/v2"
+	log "github.com/sirupsen/logrus"
 )
 
 // EnvConfigLoader loads configuration from environment variables
@@ -85,7 +85,7 @@ func NewEnvConfigLoader(opts ...EnvLoaderOption) *EnvConfigLoader {
 // It derives the prefix from moduleKey by replacing dots with underscores:
 //   - moduleKey="collectors.node" -> "COLLECTORS_NODE_"
 //   - options.Prefix="APP_" + moduleKey="collectors.node" -> "APP_COLLECTORS_NODE_"
-func (l *EnvConfigLoader) LoadModuleConfig(moduleKey string, target interface{}) error {
+func (l *EnvConfigLoader) LoadModuleConfig(moduleKey string, target any) error {
 	// Copy options to avoid modifying the original
 	opts := l.options
 
@@ -94,15 +94,23 @@ func (l *EnvConfigLoader) LoadModuleConfig(moduleKey string, target interface{})
 
 	// Prepend custom prefix if provided
 	if opts.Prefix != "" {
-		opts.Prefix = opts.Prefix + derivedPrefix
+		opts.Prefix += derivedPrefix
 	} else {
 		opts.Prefix = derivedPrefix
 	}
 
 	if err := env.ParseWithOptions(target, opts); err != nil {
-		return fmt.Errorf("failed to parse environment variables with prefix %s: %w", opts.Prefix, err)
+		return fmt.Errorf(
+			"failed to parse environment variables with prefix %s: %w",
+			opts.Prefix,
+			err,
+		)
 	}
 
-	klog.V(4).InfoS("Module config loaded from environment variables", "module", moduleKey, "prefix", opts.Prefix)
+	log.WithFields(log.Fields{
+		"module": moduleKey,
+		"prefix": opts.Prefix,
+	}).Debug("Module config loaded from environment variables")
+
 	return nil
 }

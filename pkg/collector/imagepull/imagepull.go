@@ -2,46 +2,48 @@ package imagepull
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
 )
 
 // ImagePullInfo tracks image pull information
 type ImagePullInfo struct {
-	Namespace      string
-	Pod            string
-	Container      string
-	Image          string
-	Reason         FailureReason
-	StartTime      time.Time
-	EndTime        time.Time
-	Duration       time.Duration
-	Failed         bool
+	Namespace string
+	Pod       string
+	Container string
+	Image     string
+	Reason    FailureReason
+	StartTime time.Time
+	EndTime   time.Time
+	Duration  time.Duration
+	Failed    bool
 }
 
 // Collector collects image pull metrics
 type Collector struct {
 	*base.BaseCollector
 
-	client     kubernetes.Interface
-	config     *Config
+	client        kubernetes.Interface
+	config        *Config
 	podInformer   cache.SharedIndexInformer
 	eventInformer cache.SharedIndexInformer
-	classifier *FailureClassifier
-	stopCh     chan struct{}
+	classifier    *FailureClassifier
+	stopCh        chan struct{}
+	logger        *log.Entry
 
-	mu          sync.RWMutex
-	pullInfo    map[string]*ImagePullInfo // key: namespace/pod/container
-	pullEvents  map[string]time.Time      // key: namespace/pod/image (Pulling start time)
+	mu         sync.RWMutex
+	pullInfo   map[string]*ImagePullInfo // key: namespace/pod/container
+	pullEvents map[string]time.Time      // key: namespace/pod/image (Pulling start time)
 
 	// Metrics
 	imagePullFailures *prometheus.Desc
@@ -87,6 +89,7 @@ func (c *Collector) Start(ctx context.Context) error {
 
 	// Create pod informer
 	c.podInformer = factory.Core().V1().Pods().Informer()
+	//nolint:errcheck // AddEventHandler returns (registration, error) but error is always nil in client-go
 	c.podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.handlePodAdd,
 		UpdateFunc: c.handlePodUpdate,
@@ -95,6 +98,7 @@ func (c *Collector) Start(ctx context.Context) error {
 
 	// Create event informer
 	c.eventInformer = factory.Core().V1().Events().Informer()
+	//nolint:errcheck // AddEventHandler returns (registration, error) but error is always nil in client-go
 	c.eventInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.handleEventAdd,
 		UpdateFunc: c.handleEventUpdate,
@@ -104,15 +108,17 @@ func (c *Collector) Start(ctx context.Context) error {
 	factory.Start(c.stopCh)
 
 	// Wait for cache sync
-	klog.InfoS("Waiting for imagepull informers cache sync")
+	c.logger.Info("Waiting for imagepull informers cache sync")
+
 	if !cache.WaitForCacheSync(c.stopCh, c.podInformer.HasSynced, c.eventInformer.HasSynced) {
-		return fmt.Errorf("failed to sync imagepull informers cache")
+		return errors.New("failed to sync imagepull informers cache")
 	}
 
 	// Start cleanup goroutine
 	go c.cleanupLoop()
 
-	klog.InfoS("ImagePull collector started successfully")
+	c.logger.Info("ImagePull collector started successfully")
+
 	return nil
 }
 
@@ -129,20 +135,21 @@ func (c *Collector) HasSynced() bool {
 }
 
 // handlePodAdd handles pod add events
-func (c *Collector) handlePodAdd(obj interface{}) {
-	pod := obj.(*corev1.Pod)
+func (c *Collector) handlePodAdd(obj any) {
+	pod := obj.(*corev1.Pod) //nolint:errcheck // Type assertion is safe from informer
 	c.processPod(pod)
 }
 
 // handlePodUpdate handles pod update events
-func (c *Collector) handlePodUpdate(oldObj, newObj interface{}) {
-	pod := newObj.(*corev1.Pod)
+func (c *Collector) handlePodUpdate(oldObj, newObj any) {
+	pod := newObj.(*corev1.Pod) //nolint:errcheck // Type assertion is safe from informer
 	c.processPod(pod)
 }
 
 // handlePodDelete handles pod delete events
-func (c *Collector) handlePodDelete(obj interface{}) {
-	pod := obj.(*corev1.Pod)
+func (c *Collector) handlePodDelete(obj any) {
+	pod := obj.(*corev1.Pod) //nolint:errcheck // Type assertion is safe from informer
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -170,8 +177,8 @@ func (c *Collector) processPod(pod *corev1.Pod) {
 
 			// Only track actual pull failures
 			if reason != FailureReasonUnknown ||
-			   waiting.Reason == "ImagePullBackOff" ||
-			   waiting.Reason == "ErrImagePull" {
+				waiting.Reason == "ImagePullBackOff" ||
+				waiting.Reason == "ErrImagePull" {
 				c.pullInfo[key] = &ImagePullInfo{
 					Namespace: pod.Namespace,
 					Pod:       pod.Name,
@@ -186,14 +193,14 @@ func (c *Collector) processPod(pod *corev1.Pod) {
 }
 
 // handleEventAdd handles event add
-func (c *Collector) handleEventAdd(obj interface{}) {
-	event := obj.(*corev1.Event)
+func (c *Collector) handleEventAdd(obj any) {
+	event := obj.(*corev1.Event) //nolint:errcheck // Type assertion is safe from informer
 	c.processEvent(event)
 }
 
 // handleEventUpdate handles event update
-func (c *Collector) handleEventUpdate(oldObj, newObj interface{}) {
-	event := newObj.(*corev1.Event)
+func (c *Collector) handleEventUpdate(oldObj, newObj any) {
+	event := newObj.(*corev1.Event) //nolint:errcheck // Type assertion is safe from informer
 	c.processEvent(event)
 }
 
@@ -215,14 +222,15 @@ func (c *Collector) processEvent(event *corev1.Event) {
 	// For simplicity, we'll track by pod and timestamp
 	eventKey := event.Namespace + "/" + event.InvolvedObject.Name
 
-	if event.Reason == "Pulling" {
+	switch event.Reason {
+	case "Pulling":
 		// Record pull start time
 		c.pullEvents[eventKey] = event.FirstTimestamp.Time
-		klog.V(4).InfoS("Image pull started", "pod", eventKey)
-	} else if event.Reason == "Pulled" {
+		c.logger.WithField("pod", eventKey).Debug("Image pull started")
+	case "Pulled":
 		// Calculate pull duration
 		if startTime, exists := c.pullEvents[eventKey]; exists {
-			duration := event.FirstTimestamp.Time.Sub(startTime)
+			duration := event.FirstTimestamp.Sub(startTime)
 
 			// Check if it's a slow pull
 			if duration > c.config.SlowPullThreshold {
@@ -248,7 +256,10 @@ func (c *Collector) processEvent(event *corev1.Event) {
 					}
 				}
 
-				klog.V(4).InfoS("Slow image pull detected", "pod", eventKey, "duration", duration)
+				c.logger.WithFields(log.Fields{
+					"pod":      eventKey,
+					"duration": duration,
+				}).Debug("Slow image pull detected")
 			}
 
 			// Clean up
@@ -294,7 +305,7 @@ func (c *Collector) cleanup() {
 		}
 	}
 
-	klog.V(4).InfoS("Cleaned up old image pull entries", "remaining", len(c.pullInfo))
+	c.logger.WithField("remaining", len(c.pullInfo)).Debug("Cleaned up old image pull entries")
 }
 
 // collect collects metrics
@@ -355,6 +366,7 @@ func extractImageFromMessage(message string) string {
 	// Simple extraction - in production would use better parsing
 	// Example: "Successfully pulled image \"nginx:latest\" in 2.5s"
 	start := -1
+
 	end := -1
 	for i, c := range message {
 		if c == '"' {
@@ -366,8 +378,10 @@ func extractImageFromMessage(message string) string {
 			}
 		}
 	}
+
 	if start != -1 && end != -1 {
 		return message[start:end]
 	}
+
 	return "unknown"
 }

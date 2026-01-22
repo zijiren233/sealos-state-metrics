@@ -2,17 +2,17 @@ package pod
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
 )
 
 // Collector collects pod metrics
@@ -24,17 +24,18 @@ type Collector struct {
 	informer   cache.SharedIndexInformer
 	aggregator *PodAggregator
 	stopCh     chan struct{}
+	logger     *log.Entry
 
 	mu   sync.RWMutex
 	pods map[string]*corev1.Pod // key: namespace/name
 
 	// Metrics
-	podStatusPhase           *prometheus.Desc
-	podRestartTotal          *prometheus.Desc
-	podCondition             *prometheus.Desc
-	podOOMKilledTotal        *prometheus.Desc
-	podAbnormalDuration      *prometheus.Desc
-	podAggregatedCount       *prometheus.Desc
+	podStatusPhase      *prometheus.Desc
+	podRestartTotal     *prometheus.Desc
+	podCondition        *prometheus.Desc
+	podOOMKilledTotal   *prometheus.Desc
+	podAbnormalDuration *prometheus.Desc
+	podAggregatedCount  *prometheus.Desc
 }
 
 // initMetrics initializes Prometheus metric descriptors
@@ -97,23 +98,19 @@ func (c *Collector) Start(ctx context.Context) error {
 	}
 
 	// Create informer factory
-	var factory informers.SharedInformerFactory
-	if len(c.config.Namespaces) > 0 {
-		// TODO: Support filtering by namespaces
-		// For now, watch all namespaces
-		factory = informers.NewSharedInformerFactory(c.client, 10*time.Minute)
-	} else {
-		factory = informers.NewSharedInformerFactory(c.client, 10*time.Minute)
-	}
+	// TODO: Support filtering by namespaces
+	factory := informers.NewSharedInformerFactory(c.client, 10*time.Minute)
 
 	// Create pod informer
 	c.informer = factory.Core().V1().Pods().Informer()
 
 	// Add event handlers
+	//nolint:errcheck // AddEventHandler returns (registration, error) but error is always nil in client-go
 	c.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			pod := obj.(*corev1.Pod)
+		AddFunc: func(obj any) {
+			pod := obj.(*corev1.Pod) //nolint:errcheck // Type assertion is safe from informer
 			key := podKey(pod)
+
 			c.mu.Lock()
 			c.pods[key] = pod.DeepCopy()
 			c.mu.Unlock()
@@ -121,11 +118,16 @@ func (c *Collector) Start(ctx context.Context) error {
 			if c.aggregator != nil {
 				c.aggregator.AddPod(pod)
 			}
-			klog.V(4).InfoS("Pod added", "pod", key, "phase", pod.Status.Phase)
+
+			c.logger.WithFields(log.Fields{
+				"pod":   key,
+				"phase": pod.Status.Phase,
+			}).Debug("Pod added")
 		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			pod := newObj.(*corev1.Pod)
+		UpdateFunc: func(oldObj, newObj any) {
+			pod := newObj.(*corev1.Pod) //nolint:errcheck // Type assertion is safe from informer
 			key := podKey(pod)
+
 			c.mu.Lock()
 			c.pods[key] = pod.DeepCopy()
 			c.mu.Unlock()
@@ -133,11 +135,16 @@ func (c *Collector) Start(ctx context.Context) error {
 			if c.aggregator != nil {
 				c.aggregator.AddPod(pod)
 			}
-			klog.V(4).InfoS("Pod updated", "pod", key, "phase", pod.Status.Phase)
+
+			c.logger.WithFields(log.Fields{
+				"pod":   key,
+				"phase": pod.Status.Phase,
+			}).Debug("Pod updated")
 		},
-		DeleteFunc: func(obj interface{}) {
-			pod := obj.(*corev1.Pod)
+		DeleteFunc: func(obj any) {
+			pod := obj.(*corev1.Pod) //nolint:errcheck // Type assertion is safe from informer
 			key := podKey(pod)
+
 			c.mu.Lock()
 			delete(c.pods, key)
 			c.mu.Unlock()
@@ -145,7 +152,8 @@ func (c *Collector) Start(ctx context.Context) error {
 			if c.aggregator != nil {
 				c.aggregator.RemovePod(pod)
 			}
-			klog.V(4).InfoS("Pod deleted", "pod", key)
+
+			c.logger.WithField("pod", key).Debug("Pod deleted")
 		},
 	})
 
@@ -153,21 +161,25 @@ func (c *Collector) Start(ctx context.Context) error {
 	factory.Start(c.stopCh)
 
 	// Wait for cache sync
-	klog.InfoS("Waiting for pod informer cache sync")
+	c.logger.Info("Waiting for pod informer cache sync")
+
 	if !cache.WaitForCacheSync(c.stopCh, c.informer.HasSynced) {
-		return fmt.Errorf("failed to sync pod informer cache")
+		return errors.New("failed to sync pod informer cache")
 	}
 
-	klog.InfoS("Pod collector started successfully")
+	c.logger.Info("Pod collector started successfully")
+
 	return nil
 }
 
 // Stop stops the collector
 func (c *Collector) Stop() error {
 	close(c.stopCh)
+
 	if c.aggregator != nil {
 		c.aggregator.Stop()
 	}
+
 	return c.BaseCollector.Stop()
 }
 
@@ -196,9 +208,10 @@ func (c *Collector) collect(ch chan<- prometheus.Metric) {
 		// Pod conditions
 		for _, condition := range pod.Status.Conditions {
 			status := "unknown"
-			if condition.Status == corev1.ConditionTrue {
+			switch condition.Status {
+			case corev1.ConditionTrue:
 				status = "true"
-			} else if condition.Status == corev1.ConditionFalse {
+			case corev1.ConditionFalse:
 				status = "false"
 			}
 
@@ -216,7 +229,7 @@ func (c *Collector) collect(ch chan<- prometheus.Metric) {
 		// Container restarts and OOM kills
 		for _, containerStatus := range pod.Status.ContainerStatuses {
 			// Restart count
-			if containerStatus.RestartCount >= int32(c.config.RestartThreshold) {
+			if int(containerStatus.RestartCount) >= c.config.RestartThreshold {
 				ch <- prometheus.MustNewConstMetric(
 					c.podRestartTotal,
 					prometheus.CounterValue,

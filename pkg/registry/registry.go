@@ -2,15 +2,16 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector"
 	"github.com/zijiren233/sealos-state-metric/pkg/config"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/klog/v2"
 )
 
 var (
@@ -35,6 +36,7 @@ func GetRegistry() *Registry {
 			collectors: make(map[string]collector.Collector),
 		}
 	})
+
 	return globalRegistry
 }
 
@@ -42,15 +44,18 @@ func GetRegistry() *Registry {
 // This function is typically called from init() functions in collector packages.
 func Register(name string, factory collector.Factory) {
 	registry := GetRegistry()
+
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
+	logger := log.WithField("module", "registry")
+
 	if _, exists := registry.factories[name]; exists {
-		klog.Warningf("Collector factory %s already registered, overwriting", name)
+		logger.Warnf("Collector factory %s already registered, overwriting", name)
 	}
 
 	registry.factories[name] = factory
-	klog.V(4).InfoS("Collector factory registered", "name", name)
+	logger.WithField("name", name).Debug("Collector factory registered")
 }
 
 // MustRegister is like Register but panics if registration fails
@@ -58,9 +63,11 @@ func MustRegister(name string, factory collector.Factory) {
 	if name == "" {
 		panic("collector name cannot be empty")
 	}
+
 	if factory == nil {
 		panic(fmt.Sprintf("collector factory for %s cannot be nil", name))
 	}
+
 	Register(name, factory)
 }
 
@@ -69,7 +76,7 @@ func MustRegister(name string, factory collector.Factory) {
 func (r *Registry) Initialize(
 	ctx context.Context,
 	client kubernetes.Interface,
-	configFile string,
+	configContent []byte,
 	metricsNamespace string,
 	informerResyncPeriod time.Duration,
 	enabledCollectors []string,
@@ -78,48 +85,59 @@ func (r *Registry) Initialize(
 	defer r.mu.Unlock()
 
 	if len(r.collectors) > 0 {
-		return fmt.Errorf("registry already initialized")
+		return errors.New("registry already initialized")
 	}
 
-	klog.InfoS("Initializing collectors", "enabled", enabledCollectors)
+	logger := log.WithField("module", "registry")
+	logger.WithField("enabled", enabledCollectors).Info("Initializing collectors")
 
-	// Create module config loader with pipe mode: file -> env
+	// Create module config loader with pipe mode: content -> env
 	// ConfigLoader is never nil - use NullLoader as fallback
-	// The pipe ensures configuration priority: defaults < file < env variables
+	// The pipe ensures configuration priority: defaults < content < env variables
 	configLoader := config.NewWrapConfigLoader()
 
-	// Add file loader if config file is provided
-	if configFile != "" {
-		configLoader.Add(config.NewModuleConfigLoader(configFile))
+	// Add content loader if config content is provided
+	if len(configContent) > 0 {
+		configLoader.Add(config.NewModuleConfigLoader(configContent))
 	}
 
 	// Always add env loader (highest priority)
 	configLoader.Add(config.NewEnvConfigLoader())
 
-	// Create FactoryContext
-	factoryCtx := &collector.FactoryContext{
-		Ctx:                  ctx,
-		Client:               client,
-		ConfigLoader:         configLoader,
-		MetricsNamespace:     metricsNamespace,
-		InformerResyncPeriod: informerResyncPeriod,
-	}
+	// Create base logger
+	baseLogger := log.WithField("module", "registry")
 
 	for _, name := range enabledCollectors {
 		factory, exists := r.factories[name]
 		if !exists {
-			klog.Warningf("Collector factory not found: %s", name)
+			logger.Warnf("Collector factory not found: %s", name)
 			continue
+		}
+
+		// Create collector-specific logger with collector name field
+		collectorLogger := baseLogger.WithField("collector", name)
+
+		// Create FactoryContext with collector-specific logger
+		factoryCtx := &collector.FactoryContext{
+			Ctx:                  ctx,
+			Client:               client,
+			ConfigLoader:         configLoader,
+			MetricsNamespace:     metricsNamespace,
+			InformerResyncPeriod: informerResyncPeriod,
+			Logger:               collectorLogger,
 		}
 
 		c, err := factory(factoryCtx)
 		if err != nil {
-			klog.V(4).InfoS("Collector not enabled", "name", name, "error", err)
+			logger.WithField("name", name).WithError(err).Debug("Collector not enabled")
 			continue
 		}
 
 		r.collectors[name] = c
-		klog.InfoS("Collector initialized", "name", name, "type", c.Type())
+		logger.WithFields(log.Fields{
+			"name": name,
+			"type": c.Type(),
+		}).Info("Collector initialized")
 	}
 
 	return nil
@@ -137,8 +155,10 @@ func (r *Registry) StartWithLeaderElection(ctx context.Context, leaderOnly bool)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	logger := log.WithField("module", "registry")
+
 	if len(r.collectors) == 0 {
-		klog.Warning("No collectors to start")
+		logger.Warn("No collectors to start")
 		return nil
 	}
 
@@ -149,22 +169,22 @@ func (r *Registry) StartWithLeaderElection(ctx context.Context, leaderOnly bool)
 		}
 	}
 
-	klog.InfoS("Starting collectors", "count", len(toStart), "leaderOnly", leaderOnly)
+	logger.WithFields(log.Fields{
+		"count":      len(toStart),
+		"leaderOnly": leaderOnly,
+	}).Info("Starting collectors")
 
 	var errs []error
 	for _, name := range toStart {
 		c := r.collectors[name]
 		if err := c.Start(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to start collector %s: %w", name, err))
-			klog.ErrorS(err, "Failed to start collector", "name", name)
+			logger.WithError(err).WithField("name", name).Error("Failed to start collector")
 		} else {
-			klog.InfoS(
-				"Collector started",
-				"name",
-				name,
-				"requiresLeaderElection",
-				c.RequiresLeaderElection(),
-			)
+			logger.WithFields(log.Fields{
+				"name":                   name,
+				"requiresLeaderElection": c.RequiresLeaderElection(),
+			}).Info("Collector started")
 		}
 	}
 
@@ -187,6 +207,8 @@ func (r *Registry) StopWithLeaderElection(leaderOnly bool) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	logger := log.WithField("module", "registry")
+
 	if len(r.collectors) == 0 {
 		return nil
 	}
@@ -198,14 +220,17 @@ func (r *Registry) StopWithLeaderElection(leaderOnly bool) error {
 		}
 	}
 
-	klog.InfoS("Stopping collectors", "count", len(toStop), "leaderOnly", leaderOnly)
+	logger.WithFields(log.Fields{
+		"count":      len(toStop),
+		"leaderOnly": leaderOnly,
+	}).Info("Stopping collectors")
 
 	var errs []error
 	for _, name := range toStop {
 		c := r.collectors[name]
 		if err := c.Stop(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to stop collector %s: %w", name, err))
-			klog.ErrorS(err, "Failed to stop collector", "name", name)
+			logger.WithError(err).WithField("name", name).Error("Failed to stop collector")
 		}
 	}
 
@@ -222,6 +247,7 @@ func (r *Registry) GetCollector(name string) (collector.Collector, bool) {
 	defer r.mu.RUnlock()
 
 	c, exists := r.collectors[name]
+
 	return c, exists
 }
 
@@ -234,6 +260,7 @@ func (r *Registry) ListCollectors() []string {
 	for name := range r.collectors {
 		names = append(names, name)
 	}
+
 	return names
 }
 
@@ -246,6 +273,7 @@ func (r *Registry) HealthCheck() map[string]error {
 	for name, c := range r.collectors {
 		results[name] = c.Health()
 	}
+
 	return results
 }
 

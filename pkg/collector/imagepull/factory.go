@@ -1,13 +1,12 @@
 package imagepull
 
 import (
-	"fmt"
+	"errors"
 	"time"
 
 	"github.com/zijiren233/sealos-state-metric/pkg/collector"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	"github.com/zijiren233/sealos-state-metric/pkg/registry"
-	"k8s.io/klog/v2"
 )
 
 const collectorName = "imagepull"
@@ -24,21 +23,27 @@ func NewCollector(factoryCtx *collector.FactoryContext) (collector.Collector, er
 	// 2. Load configuration from ConfigLoader pipe (file -> env)
 	// ConfigLoader is never nil and handles priority: defaults < file < env
 	if err := factoryCtx.ConfigLoader.LoadModuleConfig("collectors.imagepull", cfg); err != nil {
-		klog.V(4).InfoS("Failed to load imagepull collector config, using defaults", "error", err)
+		factoryCtx.Logger.WithError(err).
+			Debug("Failed to load imagepull collector config, using defaults")
 	}
 
 	if !cfg.Enabled {
-		return nil, fmt.Errorf("imagepull collector is not enabled")
+		return nil, errors.New("imagepull collector is not enabled")
 	}
 
 	c := &Collector{
-		BaseCollector: base.NewBaseCollector(collectorName, collector.TypeWatcher),
-		client:        factoryCtx.Client,
-		config:        cfg,
-		classifier:    NewFailureClassifier(),
-		pullInfo:      make(map[string]*ImagePullInfo),
-		pullEvents:    make(map[string]time.Time),
-		stopCh:        make(chan struct{}),
+		BaseCollector: base.NewBaseCollector(
+			collectorName,
+			collector.TypeWatcher,
+			factoryCtx.Logger,
+		),
+		client:     factoryCtx.Client,
+		config:     cfg,
+		classifier: NewFailureClassifier(),
+		pullInfo:   make(map[string]*ImagePullInfo),
+		pullEvents: make(map[string]time.Time),
+		stopCh:     make(chan struct{}),
+		logger:     factoryCtx.Logger,
 	}
 
 	c.initMetrics(factoryCtx.MetricsNamespace)

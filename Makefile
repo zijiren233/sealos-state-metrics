@@ -1,17 +1,9 @@
 # Makefile for Sealos State Metric
 
-# Build variables
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_DATE ?= $(shell date -u '+%Y-%m-%d_%H:%M:%S')
-
 # Go variables
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
-GOFLAGS := -ldflags="-s -w \
-	-X 'github.com/zijiren233/sealos-state-metric/cmd/sealos-state-metric/app.Version=$(VERSION)' \
-	-X 'github.com/zijiren233/sealos-state-metric/cmd/sealos-state-metric/app.GitCommit=$(GIT_COMMIT)' \
-	-X 'github.com/zijiren233/sealos-state-metric/cmd/sealos-state-metric/app.BuildDate=$(BUILD_DATE)'"
+GOFLAGS := -ldflags="-s -w"
 
 # Docker variables
 DOCKER_REGISTRY ?= ghcr.io

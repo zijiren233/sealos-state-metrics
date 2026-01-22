@@ -59,7 +59,9 @@ func (o *Options) ParsedEnabledCollectors() []string {
 	if o.EnabledCollectors == "" {
 		return []string{}
 	}
+
 	collectors := strings.Split(o.EnabledCollectors, ",")
+
 	result := make([]string, 0, len(collectors))
 	for _, c := range collectors {
 		c = strings.TrimSpace(c)
@@ -67,6 +69,7 @@ func (o *Options) ParsedEnabledCollectors() []string {
 			result = append(result, c)
 		}
 	}
+
 	return result
 }
 
@@ -81,5 +84,6 @@ func GetPodNamespace() string {
 	if ns == "" {
 		ns = "default"
 	}
+
 	return ns
 }

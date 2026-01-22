@@ -2,16 +2,17 @@ package leaderelection
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync/atomic"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
-	"k8s.io/klog/v2"
 )
 
 // Config contains the configuration for leader election
@@ -42,6 +43,7 @@ type LeaderElector struct {
 	leaderElection *leaderelection.LeaderElector
 	isLeader       atomic.Bool
 	currentLeader  atomic.Value
+	logger         *log.Entry
 
 	// Callbacks
 	onStartedLeading func(ctx context.Context)
@@ -50,12 +52,21 @@ type LeaderElector struct {
 }
 
 // NewLeaderElector creates a new LeaderElector instance
-func NewLeaderElector(cfg *Config, client kubernetes.Interface) (*LeaderElector, error) {
+func NewLeaderElector(
+	cfg *Config,
+	client kubernetes.Interface,
+	logger *log.Entry,
+) (*LeaderElector, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("config cannot be nil")
+		return nil, errors.New("config cannot be nil")
 	}
+
 	if client == nil {
-		return nil, fmt.Errorf("client cannot be nil")
+		return nil, errors.New("client cannot be nil")
+	}
+
+	if logger == nil {
+		logger = log.WithField("component", "leader-election")
 	}
 
 	if cfg.Identity == "" {
@@ -67,17 +78,20 @@ func NewLeaderElector(cfg *Config, client kubernetes.Interface) (*LeaderElector,
 			if err != nil {
 				return nil, fmt.Errorf("failed to determine identity: %w", err)
 			}
+
 			cfg.Identity = hostname
 		}
 	}
 
-	klog.InfoS("Creating leader elector",
-		"namespace", cfg.Namespace,
-		"leaseName", cfg.LeaseName,
-		"identity", cfg.Identity)
+	logger.WithFields(log.Fields{
+		"namespace": cfg.Namespace,
+		"leaseName": cfg.LeaseName,
+		"identity":  cfg.Identity,
+	}).Info("Creating leader elector")
 
 	return &LeaderElector{
 		config: cfg,
+		logger: logger,
 		client: client,
 	}, nil
 }
@@ -117,25 +131,30 @@ func (le *LeaderElector) Run(ctx context.Context) error {
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				le.isLeader.Store(true)
-				klog.InfoS("Started leading", "identity", le.config.Identity)
+				le.logger.WithField("identity", le.config.Identity).Info("Started leading")
+
 				if le.onStartedLeading != nil {
 					le.onStartedLeading(ctx)
 				}
 			},
 			OnStoppedLeading: func() {
 				le.isLeader.Store(false)
-				klog.InfoS("Stopped leading", "identity", le.config.Identity)
+				le.logger.WithField("identity", le.config.Identity).Info("Stopped leading")
+
 				if le.onStoppedLeading != nil {
 					le.onStoppedLeading()
 				}
 			},
 			OnNewLeader: func(identity string) {
 				le.currentLeader.Store(identity)
+
 				if identity == le.config.Identity {
-					klog.InfoS("Successfully acquired leadership", "identity", identity)
+					le.logger.WithField("identity", identity).
+						Info("Successfully acquired leadership")
 				} else {
-					klog.InfoS("New leader elected", "leader", identity)
+					le.logger.WithField("leader", identity).Info("New leader elected")
 				}
+
 				if le.onNewLeader != nil {
 					le.onNewLeader(identity)
 				}
@@ -151,10 +170,11 @@ func (le *LeaderElector) Run(ctx context.Context) error {
 
 	le.leaderElection = elector
 
-	klog.InfoS("Starting leader election",
-		"leaseDuration", le.config.LeaseDuration,
-		"renewDeadline", le.config.RenewDeadline,
-		"retryPeriod", le.config.RetryPeriod)
+	le.logger.WithFields(log.Fields{
+		"leaseDuration": le.config.LeaseDuration,
+		"renewDeadline": le.config.RenewDeadline,
+		"retryPeriod":   le.config.RetryPeriod,
+	}).Info("Starting leader election")
 
 	// Run the leader election (blocks until context is cancelled)
 	elector.Run(ctx)
@@ -170,8 +190,11 @@ func (le *LeaderElector) IsLeader() bool {
 // GetLeader returns the identity of the current leader
 func (le *LeaderElector) GetLeader() string {
 	if leader := le.currentLeader.Load(); leader != nil {
-		return leader.(string)
+		if identity, ok := leader.(string); ok {
+			return identity
+		}
 	}
+
 	return ""
 }
 

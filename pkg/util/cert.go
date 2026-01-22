@@ -3,6 +3,7 @@ package util
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -22,7 +23,7 @@ type CertInfo struct {
 func ParseCertificate(certPEM []byte) (*CertInfo, error) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return nil, fmt.Errorf("failed to decode PEM block")
+		return nil, errors.New("failed to decode PEM block")
 	}
 
 	cert, err := x509.ParseCertificate(block.Bytes)
@@ -53,5 +54,6 @@ func ParseCertificateSafe(certPEM []byte) *CertInfo {
 			Error:   err.Error(),
 		}
 	}
+
 	return info
 }

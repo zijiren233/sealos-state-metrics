@@ -1,14 +1,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/caarlos0/env/v9"
 	"github.com/joho/godotenv"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
-	"k8s.io/klog/v2"
 )
 
 // GlobalConfig contains only top-level application configuration
@@ -38,16 +39,16 @@ type GlobalConfig struct {
 
 // ServerConfig contains HTTP server configuration
 type ServerConfig struct {
-	Address     string `yaml:"address" env:"ADDRESS" envDefault:":9090"`
+	Address     string `yaml:"address"     env:"ADDRESS"      envDefault:":9090"`
 	MetricsPath string `yaml:"metricsPath" env:"METRICS_PATH" envDefault:"/metrics"`
-	HealthPath  string `yaml:"healthPath" env:"HEALTH_PATH" envDefault:"/health"`
+	HealthPath  string `yaml:"healthPath"  env:"HEALTH_PATH"  envDefault:"/health"`
 }
 
 // KubernetesConfig contains Kubernetes client configuration
 type KubernetesConfig struct {
 	Kubeconfig string  `yaml:"kubeconfig" env:"KUBECONFIG"`
-	QPS        float32 `yaml:"qps" env:"QPS" envDefault:"50"`
-	Burst      int     `yaml:"burst" env:"BURST" envDefault:"100"`
+	QPS        float32 `yaml:"qps"        env:"QPS"        envDefault:"50"`
+	Burst      int     `yaml:"burst"      env:"BURST"      envDefault:"100"`
 }
 
 // MetricsConfig contains Prometheus metrics configuration
@@ -57,24 +58,30 @@ type MetricsConfig struct {
 
 // LeaderElectionConfig contains leader election configuration
 type LeaderElectionConfig struct {
-	Enabled       bool          `yaml:"enabled" env:"ENABLED" envDefault:"true"`
-	Namespace     string        `yaml:"namespace" env:"NAMESPACE" envDefault:"sealos-system"`
-	LeaseName     string        `yaml:"leaseName" env:"LEASE_NAME" envDefault:"sealos-state-metric"`
+	Enabled       bool          `yaml:"enabled"       env:"ENABLED"        envDefault:"true"`
+	Namespace     string        `yaml:"namespace"     env:"NAMESPACE"      envDefault:"sealos-system"`
+	LeaseName     string        `yaml:"leaseName"     env:"LEASE_NAME"     envDefault:"sealos-state-metric"`
 	LeaseDuration time.Duration `yaml:"leaseDuration" env:"LEASE_DURATION" envDefault:"15s"`
 	RenewDeadline time.Duration `yaml:"renewDeadline" env:"RENEW_DEADLINE" envDefault:"10s"`
-	RetryPeriod   time.Duration `yaml:"retryPeriod" env:"RETRY_PERIOD" envDefault:"2s"`
+	RetryPeriod   time.Duration `yaml:"retryPeriod"   env:"RETRY_PERIOD"   envDefault:"2s"`
 }
 
 // LoggingConfig contains logging configuration
 type LoggingConfig struct {
-	Level  string `yaml:"level" env:"LEVEL" envDefault:"info"`
+	Level  string `yaml:"level"  env:"LEVEL"  envDefault:"info"`
 	Format string `yaml:"format" env:"FORMAT" envDefault:"json"`
+	Debug  bool   `yaml:"debug"  env:"DEBUG"  envDefault:"false"`
+}
+
+// ToLoggerOptions converts LoggingConfig to logger initialization options
+func (c *LoggingConfig) ToLoggerOptions() (debug bool, level, format string) {
+	return c.Debug, c.Level, c.Format
 }
 
 // PerformanceConfig contains performance tuning configuration
 type PerformanceConfig struct {
-	InformerResyncPeriod  time.Duration `yaml:"informerResyncPeriod" env:"INFORMER_RESYNC_PERIOD" envDefault:"10m"`
-	Workers               int           `yaml:"workers" env:"WORKERS" envDefault:"10"`
+	InformerResyncPeriod  time.Duration `yaml:"informerResyncPeriod"  env:"INFORMER_RESYNC_PERIOD"  envDefault:"10m"`
+	Workers               int           `yaml:"workers"               env:"WORKERS"                 envDefault:"10"`
 	MetricsUpdateInterval time.Duration `yaml:"metricsUpdateInterval" env:"METRICS_UPDATE_INTERVAL" envDefault:"1m"`
 }
 
@@ -97,9 +104,12 @@ func (l *ConfigLoader) Load() (*GlobalConfig, error) {
 	// Step 1: Load .env file if specified (lowest priority, before system env)
 	if l.envFile != "" {
 		if err := godotenv.Load(l.envFile); err != nil {
-			klog.V(4).InfoS("No .env file loaded", "file", l.envFile, "error", err)
+			log.WithFields(log.Fields{
+				"file":  l.envFile,
+				"error": err,
+			}).Debug("No .env file loaded")
 		} else {
-			klog.InfoS("Loaded environment from .env file", "file", l.envFile)
+			log.WithField("file", l.envFile).Info("Loaded environment from .env file")
 		}
 	}
 
@@ -120,10 +130,11 @@ func (l *ConfigLoader) Load() (*GlobalConfig, error) {
 		return nil, fmt.Errorf("failed to parse environment variables: %w", err)
 	}
 
-	klog.V(2).InfoS("Configuration loaded",
-		"server", cfg.Server.Address,
-		"collectors", cfg.EnabledCollectors,
-		"leaderElection", cfg.LeaderElection.Enabled)
+	log.WithFields(log.Fields{
+		"server":         cfg.Server.Address,
+		"collectors":     cfg.EnabledCollectors,
+		"leaderElection": cfg.LeaderElection.Enabled,
+	}).Info("Configuration loaded")
 
 	return cfg, nil
 }
@@ -139,26 +150,28 @@ func (l *ConfigLoader) loadFromYAML(cfg *GlobalConfig) error {
 		return fmt.Errorf("failed to unmarshal YAML: %w", err)
 	}
 
-	klog.InfoS("Configuration loaded from YAML", "file", l.configFile)
+	log.WithField("file", l.configFile).Info("Configuration loaded from YAML")
+
 	return nil
 }
 
 // Validate validates the global configuration
 func (c *GlobalConfig) Validate() error {
 	if c.Server.Address == "" {
-		return fmt.Errorf("server.address cannot be empty")
+		return errors.New("server.address cannot be empty")
 	}
 
 	if c.Metrics.Namespace == "" {
-		return fmt.Errorf("metrics.namespace cannot be empty")
+		return errors.New("metrics.namespace cannot be empty")
 	}
 
 	if c.LeaderElection.Enabled {
 		if c.LeaderElection.Namespace == "" {
-			return fmt.Errorf("leaderElection.namespace required when enabled")
+			return errors.New("leaderElection.namespace required when enabled")
 		}
+
 		if c.LeaderElection.RenewDeadline >= c.LeaderElection.LeaseDuration {
-			return fmt.Errorf("leaderElection.renewDeadline must be less than leaseDuration")
+			return errors.New("leaderElection.renewDeadline must be less than leaseDuration")
 		}
 	}
 

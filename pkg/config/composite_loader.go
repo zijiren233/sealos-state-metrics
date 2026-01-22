@@ -1,8 +1,8 @@
 package config
 
 import (
+	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector"
-	"k8s.io/klog/v2"
 )
 
 // CompositeConfigLoader implements pipe mode - multiple loaders in sequence
@@ -14,10 +14,11 @@ type CompositeConfigLoader struct {
 
 // NewCompositeConfigLoader creates a new composite config loader
 // Usage example:
-//   loader := NewCompositeConfigLoader(
-//       NewModuleConfigLoader("config.yaml"),  // File config (low priority)
-//       NewEnvConfigLoader("APP_"),            // Env vars (high priority)
-//   )
+//
+//	loader := NewCompositeConfigLoader(
+//	    NewModuleConfigLoader("config.yaml"),  // File config (low priority)
+//	    NewEnvConfigLoader("APP_"),            // Env vars (high priority)
+//	)
 func NewCompositeConfigLoader(loaders ...collector.ConfigLoader) *CompositeConfigLoader {
 	return &CompositeConfigLoader{
 		loaders: loaders,
@@ -26,14 +27,18 @@ func NewCompositeConfigLoader(loaders ...collector.ConfigLoader) *CompositeConfi
 
 // LoadModuleConfig loads configuration from all loaders in sequence
 // Later loaders override values from earlier loaders
-func (c *CompositeConfigLoader) LoadModuleConfig(moduleKey string, target interface{}) error {
+func (c *CompositeConfigLoader) LoadModuleConfig(moduleKey string, target any) error {
 	for i, loader := range c.loaders {
 		if err := loader.LoadModuleConfig(moduleKey, target); err != nil {
-			klog.V(4).InfoS("Loader failed", "index", i, "error", err)
+			log.WithFields(log.Fields{
+				"index": i,
+				"error": err,
+			}).Debug("Loader failed")
 			// Continue with next loader even if one fails
 			continue
 		}
 	}
+
 	return nil
 }
 

@@ -1,13 +1,12 @@
 package pod
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/zijiren233/sealos-state-metric/pkg/collector"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	"github.com/zijiren233/sealos-state-metric/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/klog/v2"
 )
 
 const collectorName = "pod"
@@ -24,24 +23,30 @@ func NewCollector(factoryCtx *collector.FactoryContext) (collector.Collector, er
 	// 2. Load configuration from ConfigLoader pipe (file -> env)
 	// ConfigLoader is never nil and handles priority: defaults < file < env
 	if err := factoryCtx.ConfigLoader.LoadModuleConfig("collectors.pod", cfg); err != nil {
-		klog.V(4).InfoS("Failed to load pod collector config, using defaults", "error", err)
+		factoryCtx.Logger.WithError(err).
+			Debug("Failed to load pod collector config, using defaults")
 	}
 
 	if !cfg.Enabled {
-		return nil, fmt.Errorf("pod collector is not enabled")
+		return nil, errors.New("pod collector is not enabled")
 	}
 
 	c := &Collector{
-		BaseCollector: base.NewBaseCollector(collectorName, collector.TypeInformer),
-		client:        factoryCtx.Client,
-		config:        cfg,
-		pods:          make(map[string]*corev1.Pod),
-		stopCh:        make(chan struct{}),
+		BaseCollector: base.NewBaseCollector(
+			collectorName,
+			collector.TypeInformer,
+			factoryCtx.Logger,
+		),
+		client: factoryCtx.Client,
+		config: cfg,
+		pods:   make(map[string]*corev1.Pod),
+		stopCh: make(chan struct{}),
+		logger: factoryCtx.Logger,
 	}
 
 	// Initialize aggregator if enabled
 	if cfg.Aggregator.Enabled {
-		c.aggregator = NewPodAggregator(cfg.Aggregator.WindowSize)
+		c.aggregator = NewPodAggregator(cfg.Aggregator.WindowSize, factoryCtx.Logger)
 	}
 
 	c.initMetrics(factoryCtx.MetricsNamespace)

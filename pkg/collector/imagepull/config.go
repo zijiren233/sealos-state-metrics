@@ -6,9 +6,9 @@ import (
 
 // Config contains configuration for the ImagePull collector
 type Config struct {
-	Enabled           bool          `yaml:"enabled" env:"ENABLED"`
+	Enabled           bool          `yaml:"enabled"           env:"ENABLED"`
 	SlowPullThreshold time.Duration `yaml:"slowPullThreshold" env:"SLOW_PULL_THRESHOLD"`
-	EventRetention    time.Duration `yaml:"eventRetention" env:"EVENT_RETENTION"`
+	EventRetention    time.Duration `yaml:"eventRetention"    env:"EVENT_RETENTION"`
 }
 
 // NewDefaultConfig returns the default configuration for ImagePull collector

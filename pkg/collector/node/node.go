@@ -2,38 +2,39 @@ package node
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
 )
 
 // Collector collects node metrics
 type Collector struct {
 	*base.BaseCollector
 
-	client       kubernetes.Interface
-	config       *Config
-	informer     cache.SharedIndexInformer
-	stopCh       chan struct{}
+	client   kubernetes.Interface
+	config   *Config
+	informer cache.SharedIndexInformer
+	stopCh   chan struct{}
+	logger   *log.Entry
 
-	mu           sync.RWMutex
-	nodes        map[string]*corev1.Node
+	mu    sync.RWMutex
+	nodes map[string]*corev1.Node
 
 	// Metrics
-	nodeCondition        *prometheus.Desc
-	nodeInfo             *prometheus.Desc
-	nodeResourceCapacity *prometheus.Desc
+	nodeCondition           *prometheus.Desc
+	nodeInfo                *prometheus.Desc
+	nodeResourceCapacity    *prometheus.Desc
 	nodeResourceAllocatable *prometheus.Desc
-	nodeTaints           *prometheus.Desc
-	nodeAge              *prometheus.Desc
+	nodeTaints              *prometheus.Desc
+	nodeAge                 *prometheus.Desc
 }
 
 // initMetrics initializes Prometheus metric descriptors
@@ -97,27 +98,31 @@ func (c *Collector) Start(ctx context.Context) error {
 	c.informer = factory.Core().V1().Nodes().Informer()
 
 	// Add event handlers
+	//nolint:errcheck // AddEventHandler returns (registration, error) but error is always nil in client-go
 	c.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			node := obj.(*corev1.Node)
+		AddFunc: func(obj any) {
+			node := obj.(*corev1.Node) //nolint:errcheck // Type assertion is safe from informer
+
 			c.mu.Lock()
 			c.nodes[node.Name] = node.DeepCopy()
 			c.mu.Unlock()
-			klog.V(4).InfoS("Node added", "node", node.Name)
+			c.logger.WithField("node", node.Name).Debug("Node added")
 		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			node := newObj.(*corev1.Node)
+		UpdateFunc: func(oldObj, newObj any) {
+			node := newObj.(*corev1.Node) //nolint:errcheck // Type assertion is safe from informer
+
 			c.mu.Lock()
 			c.nodes[node.Name] = node.DeepCopy()
 			c.mu.Unlock()
-			klog.V(4).InfoS("Node updated", "node", node.Name)
+			c.logger.WithField("node", node.Name).Debug("Node updated")
 		},
-		DeleteFunc: func(obj interface{}) {
-			node := obj.(*corev1.Node)
+		DeleteFunc: func(obj any) {
+			node := obj.(*corev1.Node) //nolint:errcheck // Type assertion is safe from informer
+
 			c.mu.Lock()
 			delete(c.nodes, node.Name)
 			c.mu.Unlock()
-			klog.V(4).InfoS("Node deleted", "node", node.Name)
+			c.logger.WithField("node", node.Name).Debug("Node deleted")
 		},
 	})
 
@@ -125,12 +130,14 @@ func (c *Collector) Start(ctx context.Context) error {
 	factory.Start(c.stopCh)
 
 	// Wait for cache sync
-	klog.InfoS("Waiting for node informer cache sync")
+	c.logger.Info("Waiting for node informer cache sync")
+
 	if !cache.WaitForCacheSync(c.stopCh, c.informer.HasSynced) {
-		return fmt.Errorf("failed to sync node informer cache")
+		return errors.New("failed to sync node informer cache")
 	}
 
-	klog.InfoS("Node collector started successfully")
+	c.logger.Info("Node collector started successfully")
+
 	return nil
 }
 
@@ -155,17 +162,22 @@ func (c *Collector) collect(ch chan<- prometheus.Metric) {
 
 	for _, node := range c.nodes {
 		// Skip new nodes if configured
-		if node.CreationTimestamp.Time.After(ignoreThreshold) {
-			klog.V(4).InfoS("Skipping new node", "node", node.Name, "age", now.Sub(node.CreationTimestamp.Time))
+		if node.CreationTimestamp.After(ignoreThreshold) {
+			c.logger.WithFields(log.Fields{
+				"node": node.Name,
+				"age":  now.Sub(node.CreationTimestamp.Time),
+			}).Debug("Skipping new node")
+
 			continue
 		}
 
 		// Node conditions
 		for _, condition := range node.Status.Conditions {
 			status := "unknown"
-			if condition.Status == corev1.ConditionTrue {
+			switch condition.Status {
+			case corev1.ConditionTrue:
 				status = "true"
-			} else if condition.Status == corev1.ConditionFalse {
+			case corev1.ConditionFalse:
 				status = "false"
 			}
 
@@ -223,10 +235,17 @@ func (c *Collector) collect(ch chan<- prometheus.Metric) {
 }
 
 // collectResources collects resource metrics
-func (c *Collector) collectResources(ch chan<- prometheus.Metric, node *corev1.Node, resources corev1.ResourceList, desc *prometheus.Desc) {
+func (c *Collector) collectResources(
+	ch chan<- prometheus.Metric,
+	node *corev1.Node,
+	resources corev1.ResourceList,
+	desc *prometheus.Desc,
+) {
 	for resourceName, quantity := range resources {
-		var value float64
-		var unit string
+		var (
+			value float64
+			unit  string
+		)
 
 		switch resourceName {
 		case corev1.ResourceCPU:

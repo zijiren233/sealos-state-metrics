@@ -1,54 +1,65 @@
 package event
 
 import (
+	"maps"
 	"sync"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/klog/v2"
 )
 
 // AggregatedEvent represents aggregated event information
 type AggregatedEvent struct {
-	Namespace      string
-	Reason         string
-	Type           string
-	Kind           string
-	Count          int
-	LastSeen       time.Time
-	FirstSeen      time.Time
-	UniqueObjects  map[string]bool // object names
+	Namespace     string
+	Reason        string
+	Type          string
+	Kind          string
+	Count         int
+	LastSeen      time.Time
+	FirstSeen     time.Time
+	UniqueObjects map[string]bool // object names
 }
 
 // EventAggregator aggregates similar events to reduce metric cardinality
 type EventAggregator struct {
-	mu          sync.RWMutex
-	windowSize  time.Duration
-	maxEvents   int
-	aggregated  map[string]*AggregatedEvent // key: namespace/reason/kind
-	stopCh      chan struct{}
+	mu         sync.RWMutex
+	windowSize time.Duration
+	maxEvents  int
+	aggregated map[string]*AggregatedEvent // key: namespace/reason/kind
+	stopCh     chan struct{}
+	logger     *log.Entry
 }
 
 // NewEventAggregator creates a new event aggregator
-func NewEventAggregator(windowSize time.Duration, maxEvents int) *EventAggregator {
+func NewEventAggregator(
+	windowSize time.Duration,
+	maxEvents int,
+	logger *log.Entry,
+) *EventAggregator {
 	return &EventAggregator{
 		windowSize: windowSize,
 		maxEvents:  maxEvents,
 		aggregated: make(map[string]*AggregatedEvent),
 		stopCh:     make(chan struct{}),
+		logger:     logger,
 	}
 }
 
 // Start starts the aggregator cleanup goroutine
 func (a *EventAggregator) Start() {
 	go a.cleanupLoop()
-	klog.V(4).InfoS("Event aggregator started", "windowSize", a.windowSize, "maxEvents", a.maxEvents)
+
+	a.logger.WithFields(log.Fields{
+		"windowSize": a.windowSize,
+		"maxEvents":  a.maxEvents,
+	}).Debug("Event aggregator started")
 }
 
 // Stop stops the aggregator
 func (a *EventAggregator) Stop() {
 	close(a.stopCh)
-	klog.V(4).Info("Event aggregator stopped")
+	a.logger.Debug("Event aggregator stopped")
 }
 
 // AddEvent adds an event to the aggregator
@@ -71,6 +82,7 @@ func (a *EventAggregator) AddEvent(event *corev1.Event) {
 
 	if agg, exists := a.aggregated[key]; exists {
 		agg.Count += int(event.Count)
+
 		agg.LastSeen = now
 		if event.InvolvedObject.Name != "" {
 			agg.UniqueObjects[event.InvolvedObject.Name] = true
@@ -100,9 +112,8 @@ func (a *EventAggregator) GetAggregated() map[string]*AggregatedEvent {
 	defer a.mu.RUnlock()
 
 	result := make(map[string]*AggregatedEvent, len(a.aggregated))
-	for k, v := range a.aggregated {
-		result[k] = v
-	}
+	maps.Copy(result, a.aggregated)
+
 	return result
 }
 
@@ -133,15 +144,17 @@ func (a *EventAggregator) cleanup() {
 	for key, agg := range a.aggregated {
 		if agg.LastSeen.Before(threshold) {
 			delete(a.aggregated, key)
-			klog.V(4).InfoS("Cleaned up aggregated event entry", "key", key)
+			a.logger.WithField("key", key).Debug("Cleaned up aggregated event entry")
 		}
 	}
 }
 
 // removeOldest removes the oldest event from the aggregator
 func (a *EventAggregator) removeOldest() {
-	var oldestKey string
-	var oldestTime time.Time
+	var (
+		oldestKey  string
+		oldestTime time.Time
+	)
 
 	for key, agg := range a.aggregated {
 		if oldestKey == "" || agg.LastSeen.Before(oldestTime) {
@@ -152,7 +165,7 @@ func (a *EventAggregator) removeOldest() {
 
 	if oldestKey != "" {
 		delete(a.aggregated, oldestKey)
-		klog.V(4).InfoS("Removed oldest event due to max events limit", "key", oldestKey)
+		a.logger.WithField("key", oldestKey).Debug("Removed oldest event due to max events limit")
 	}
 }
 
