@@ -40,6 +40,9 @@ type GlobalConfig struct {
 
 	// Enabled collectors (list of collector names)
 	EnabledCollectors []string `yaml:"enabledCollectors" help:"Comma-separated list of enabled collectors" default:"domain,node,pod,imagepull,zombie" env:"ENABLED_COLLECTORS" sep:","`
+
+	// Instance identity (optional, defaults to POD_NAME env var, IP, hostname, or random ID)
+	Identity string `yaml:"identity" help:"Instance identity (overrides auto-detection)" env:"IDENTITY"`
 }
 
 // ServerConfig contains HTTP server configuration

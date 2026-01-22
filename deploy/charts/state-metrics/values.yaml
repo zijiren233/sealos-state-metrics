@@ -2,7 +2,12 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# Number of replicas
+# Deployment mode: "daemonset" or "deployment"
+# daemonset: runs on every node (default, recommended for node monitoring)
+# deployment: runs N replicas (useful when leader election is enabled)
+deploymentMode: daemonset
+
+# Number of replicas (only used when deploymentMode is "deployment")
 replicaCount: 1
 
 # Container image configuration
@@ -86,6 +91,13 @@ readinessProbe:
 nodeSelector: {}
 
 # Tolerations for pod assignment
+# For DaemonSet mode, you may want to run on all nodes including control plane:
+# tolerations:
+#   - operator: Exists
+# Or for control plane nodes only:
+#   - key: node-role.kubernetes.io/control-plane
+#     operator: Exists
+#     effect: NoSchedule
 tolerations: []
 
 # Affinity rules for pod assignment

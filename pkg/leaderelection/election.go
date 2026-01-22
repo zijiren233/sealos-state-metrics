@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/zijiren233/sealos-state-metric/pkg/identity"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
@@ -69,19 +69,8 @@ func NewLeaderElector(
 		logger = log.WithField("component", "leader-election")
 	}
 
-	if cfg.Identity == "" {
-		// Try to get pod name from environment
-		cfg.Identity = os.Getenv("POD_NAME")
-		if cfg.Identity == "" {
-			// Use hostname as fallback
-			hostname, err := os.Hostname()
-			if err != nil {
-				return nil, fmt.Errorf("failed to determine identity: %w", err)
-			}
-
-			cfg.Identity = hostname
-		}
-	}
+	// Use global identity with config override support
+	cfg.Identity = identity.GetWithConfig(cfg.Identity)
 
 	logger.WithFields(log.Fields{
 		"namespace": cfg.Namespace,

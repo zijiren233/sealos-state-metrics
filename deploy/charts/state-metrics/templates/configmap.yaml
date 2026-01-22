@@ -28,9 +28,8 @@ data:
   # Leader election configuration
   LEADER_ELECTION_ENABLED: {{ .Values.config.leaderElection.enabled | quote }}
   {{- if .Values.config.leaderElection.namespace }}
+  # Override namespace from Downward API if explicitly configured
   LEADER_ELECTION_NAMESPACE: {{ .Values.config.leaderElection.namespace | quote }}
-  {{- else }}
-  LEADER_ELECTION_NAMESPACE: {{ .Release.Namespace | quote }}
   {{- end }}
   LEADER_ELECTION_LEASE_NAME: {{ .Values.config.leaderElection.leaseName | quote }}
   LEADER_ELECTION_LEASE_DURATION: {{ .Values.config.leaderElection.leaseDuration | quote }}

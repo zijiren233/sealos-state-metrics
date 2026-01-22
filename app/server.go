@@ -74,6 +74,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.config.Metrics.Namespace,
 		s.config.Performance.InformerResyncPeriod,
 		s.config.EnabledCollectors,
+		s.config.Identity,
 	); err != nil {
 		return fmt.Errorf("failed to initialize collectors: %w", err)
 	}
@@ -105,6 +106,7 @@ func (s *Server) Run(ctx context.Context) error {
 		leConfig := &leaderelection.Config{
 			Namespace:     s.config.LeaderElection.Namespace,
 			LeaseName:     s.config.LeaderElection.LeaseName,
+			Identity:      s.config.Identity, // Use configured identity
 			LeaseDuration: s.config.LeaderElection.LeaseDuration,
 			RenewDeadline: s.config.LeaderElection.RenewDeadline,
 			RetryPeriod:   s.config.LeaderElection.RetryPeriod,

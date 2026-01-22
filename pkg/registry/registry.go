@@ -11,8 +11,14 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector"
 	"github.com/zijiren233/sealos-state-metric/pkg/config"
+	"github.com/zijiren233/sealos-state-metric/pkg/identity"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+)
+
+const (
+	// slowCollectorThreshold defines the duration after which a collector is considered slow
+	slowCollectorThreshold = 500 * time.Millisecond
 )
 
 var (
@@ -27,6 +33,7 @@ type Registry struct {
 	mu         sync.RWMutex
 	factories  map[string]collector.Factory
 	collectors map[string]collector.Collector
+	instance   string // instance identity (pod name or hostname)
 }
 
 // GetRegistry returns the singleton registry instance
@@ -82,6 +89,7 @@ func (r *Registry) Initialize(
 	metricsNamespace string,
 	informerResyncPeriod time.Duration,
 	enabledCollectors []string,
+	configIdentity string,
 ) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -90,8 +98,14 @@ func (r *Registry) Initialize(
 		return errors.New("registry already initialized")
 	}
 
+	// Set instance identity using config or auto-detection
+	r.instance = identity.GetWithConfig(configIdentity)
+
 	logger := log.WithField("module", "registry")
-	logger.WithField("enabled", enabledCollectors).Info("Initializing collectors")
+	logger.WithFields(log.Fields{
+		"enabled":  enabledCollectors,
+		"instance": r.instance,
+	}).Info("Initializing collectors")
 
 	// Create module config loader with pipe mode: content -> env
 	// ConfigLoader is never nil - use NullLoader as fallback
@@ -280,35 +294,176 @@ func (r *Registry) HealthCheck() map[string]error {
 	return results
 }
 
+// collectorResult holds the result of a collector execution
+type collectorResult struct {
+	name     string
+	duration time.Duration
+	success  bool
+}
+
 // PrometheusCollector wraps the registry as a prometheus.Collector.
 // This allows all collectors to be registered with a single Prometheus registry.
 type PrometheusCollector struct {
 	registry *Registry
+	instance string
+
+	// Duration metrics
+	collectorDuration *prometheus.Desc
+	collectorSuccess  *prometheus.Desc
 }
 
 // NewPrometheusCollector creates a new PrometheusCollector
 func NewPrometheusCollector(registry *Registry) *PrometheusCollector {
+	registry.mu.RLock()
+	instance := registry.instance
+	registry.mu.RUnlock()
+
 	return &PrometheusCollector{
 		registry: registry,
+		instance: instance,
+		collectorDuration: prometheus.NewDesc(
+			"sealos_state_metric_collector_duration_seconds",
+			"Duration of collector scrape in seconds",
+			[]string{"collector", "instance"},
+			nil,
+		),
+		collectorSuccess: prometheus.NewDesc(
+			"sealos_state_metric_collector_success",
+			"Whether collector scrape was successful (1=success, 0=failure)",
+			[]string{"collector", "instance"},
+			nil,
+		),
 	}
 }
 
 // Describe implements prometheus.Collector
 func (pc *PrometheusCollector) Describe(ch chan<- *prometheus.Desc) {
 	pc.registry.mu.RLock()
-	defer pc.registry.mu.RUnlock()
-
+	collectors := make([]collector.Collector, 0, len(pc.registry.collectors))
 	for _, c := range pc.registry.collectors {
-		c.Describe(ch)
+		collectors = append(collectors, c)
+	}
+	pc.registry.mu.RUnlock()
+
+	// Describe our own metrics
+	ch <- pc.collectorDuration
+	ch <- pc.collectorSuccess
+
+	// Describe all collectors concurrently
+	var wg sync.WaitGroup
+	for _, c := range collectors {
+		wg.Add(1)
+		go func(col collector.Collector) {
+			defer wg.Done()
+			col.Describe(ch)
+		}(c)
+	}
+	wg.Wait()
+}
+
+// collectFromCollector executes a single collector and returns the result
+func collectFromCollector(
+	name string,
+	col collector.Collector,
+	ch chan<- prometheus.Metric,
+	logger *log.Entry,
+) collectorResult {
+	start := time.Now()
+	success := true
+
+	// Collect metrics with panic recovery
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.WithFields(log.Fields{
+					"collector": name,
+					"panic":     r,
+				}).Error("Collector panicked during collection")
+				success = false
+			}
+		}()
+
+		col.Collect(ch)
+	}()
+
+	duration := time.Since(start)
+
+	// Log slow collectors
+	if duration > slowCollectorThreshold {
+		logger.WithFields(log.Fields{
+			"collector": name,
+			"duration":  duration,
+		}).Warn("Slow collector detected")
+	}
+
+	return collectorResult{
+		name:     name,
+		duration: duration,
+		success:  success,
+	}
+}
+
+// emitCollectorMetrics emits duration and success metrics for collectors
+func (pc *PrometheusCollector) emitCollectorMetrics(
+	results []collectorResult,
+	ch chan<- prometheus.Metric,
+) {
+	for _, result := range results {
+		ch <- prometheus.MustNewConstMetric(
+			pc.collectorDuration,
+			prometheus.GaugeValue,
+			result.duration.Seconds(),
+			result.name,
+			pc.instance,
+		)
+
+		successValue := 0.0
+		if result.success {
+			successValue = 1.0
+		}
+		ch <- prometheus.MustNewConstMetric(
+			pc.collectorSuccess,
+			prometheus.GaugeValue,
+			successValue,
+			result.name,
+			pc.instance,
+		)
 	}
 }
 
 // Collect implements prometheus.Collector
 func (pc *PrometheusCollector) Collect(ch chan<- prometheus.Metric) {
+	// Copy collectors map to reduce lock contention
 	pc.registry.mu.RLock()
-	defer pc.registry.mu.RUnlock()
-
-	for _, c := range pc.registry.collectors {
-		c.Collect(ch)
+	collectors := make(map[string]collector.Collector, len(pc.registry.collectors))
+	for name, c := range pc.registry.collectors {
+		collectors[name] = c
 	}
+	pc.registry.mu.RUnlock()
+
+	logger := log.WithField("module", "registry")
+
+	// Collect from all collectors concurrently
+	var wg sync.WaitGroup
+	resultCh := make(chan collectorResult, len(collectors))
+
+	for name, c := range collectors {
+		wg.Add(1)
+		go func(collectorName string, col collector.Collector) {
+			defer wg.Done()
+			result := collectFromCollector(collectorName, col, ch, logger)
+			resultCh <- result
+		}(name, c)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	// Collect results and emit performance metrics
+	results := make([]collectorResult, 0, len(collectors))
+	for result := range resultCh {
+		results = append(results, result)
+	}
+
+	pc.emitCollectorMetrics(results, ch)
 }
