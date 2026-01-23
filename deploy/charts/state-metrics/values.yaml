@@ -40,28 +40,18 @@ tls:
 # Authentication configuration for metrics endpoint
 auth:
   enabled: true
-  # List of ServiceAccounts allowed to access metrics
-  # When auth is enabled, only these ServiceAccounts can scrape metrics
+  # List of ServiceAccounts to grant metrics access permissions
+  # When auth is enabled, these ServiceAccounts will be granted access via ClusterRoleBinding
+  # Note: ServiceAccounts with existing permissions (e.g., cluster-admin) can also access metrics
+  # Use the following command to check permissions:
+  # kubectl auth can-i get /metrics --as=system:serviceaccount:vm:vmagent-victoria-metrics-k8s-stack
   allowedServiceAccounts:
-    # Prometheus Operator default ServiceAccount
-    - name: prometheus
-      namespace: monitoring
-    # Prometheus Operator kube-prometheus-stack default
-    - name: prometheus-kube-prometheus-prometheus
-      namespace: monitoring
-    # VictoriaMetrics Operator k8s-stack (vm namespace)
-    # kubectl auth can-i get /metrics --as=system:serviceaccount:vm:vmagent-victoria-metrics-k8s-stack
-    - name: vmagent-victoria-metrics-k8s-stack
-      namespace: vm
-    - name: vmalert-victoria-metrics-k8s-stack
-      namespace: vm
-    - name: vmcluster-victoria-metrics-k8s-stack
-      namespace: vm
-    - name: victoria-metrics-k8s-stack
-      namespace: vm
-    # Add custom ServiceAccounts below
-    # - name: custom-prometheus
-    #   namespace: custom-namespace
+    # - name: prometheus
+    #   namespace: monitoring
+    # - name: prometheus-kube-prometheus-prometheus
+    #   namespace: monitoring
+    # - name: vmagent-victoria-metrics-k8s-stack
+    #   namespace: vm
 
 serviceMonitor:
   enabled: false
