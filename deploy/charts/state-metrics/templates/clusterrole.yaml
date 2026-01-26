@@ -27,4 +27,16 @@ rules:
     resources:
       - leases
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+{{- if .Values.auth.enabled }}
+  # Authentication and authorization (required when auth is enabled)
+  - apiGroups: ["authentication.k8s.io"]
+    resources:
+      - tokenreviews
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources:
+      - subjectaccessreviews
+    verbs: ["create"]
+{{- end }}
 {{- end }}
