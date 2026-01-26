@@ -8,6 +8,7 @@ import (
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	"github.com/zijiren233/sealos-state-metric/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 )
@@ -56,6 +57,31 @@ func NewCollector(factoryCtx *collector.FactoryContext) (collector.Collector, er
 
 			// Create node informer
 			c.informer = factory.Core().V1().Nodes().Informer()
+
+			// Apply transform to reduce memory usage
+			// Only keep necessary fields for node health monitoring
+			_ = c.informer.SetTransform(func(obj any) (any, error) {
+				node, ok := obj.(*corev1.Node)
+				if !ok {
+					return obj, nil
+				}
+
+				// Create a minimal node object with only required fields
+				transformed := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              node.Name,
+						CreationTimestamp: node.CreationTimestamp,
+						// Keep UID for proper object tracking
+						UID: node.UID,
+					},
+					Status: corev1.NodeStatus{
+						// Only keep conditions
+						Conditions: node.Status.Conditions,
+					},
+				}
+
+				return transformed, nil
+			})
 
 			// Add event handlers
 			//nolint:errcheck // AddEventHandler returns (registration, error) but error is always nil in client-go

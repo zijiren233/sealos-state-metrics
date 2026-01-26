@@ -10,6 +10,7 @@ import (
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	"github.com/zijiren233/sealos-state-metric/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
@@ -67,6 +68,31 @@ func NewCollector(factoryCtx *collector.FactoryContext) (collector.Collector, er
 
 			// Create node informer
 			c.podInformer = factory.Core().V1().Nodes().Informer()
+
+			// Apply transform to reduce memory usage
+			// Only keep necessary fields for zombie node detection
+			_ = c.podInformer.SetTransform(func(obj any) (any, error) {
+				node, ok := obj.(*corev1.Node)
+				if !ok {
+					return obj, nil
+				}
+
+				// Create a minimal node object with only required fields
+				transformed := &corev1.Node{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: node.Name,
+						// Keep UID for proper object tracking
+						UID: node.UID,
+					},
+					Status: corev1.NodeStatus{
+						// Only keep conditions for Ready status check
+						Conditions: node.Status.Conditions,
+					},
+				}
+
+				return transformed, nil
+			})
+
 			//nolint:errcheck // AddEventHandler returns (registration, error) but error is always nil in client-go
 			c.podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 				AddFunc: func(obj any) {

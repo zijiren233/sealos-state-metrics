@@ -8,6 +8,8 @@ import (
 	"github.com/zijiren233/sealos-state-metric/pkg/collector"
 	"github.com/zijiren233/sealos-state-metric/pkg/collector/base"
 	"github.com/zijiren233/sealos-state-metric/pkg/registry"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 )
@@ -59,6 +61,41 @@ func NewCollector(factoryCtx *collector.FactoryContext) (collector.Collector, er
 
 			// Create pod informer
 			c.podInformer = factory.Core().V1().Pods().Informer()
+
+			// Apply transform to reduce memory usage
+			// Only keep necessary fields for image pull monitoring
+			_ = c.podInformer.SetTransform(func(obj any) (any, error) {
+				pod, ok := obj.(*corev1.Pod)
+				if !ok {
+					return obj, nil
+				}
+
+				// Create a minimal pod object with only required fields
+				transformed := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: pod.Namespace,
+						Name:      pod.Name,
+						// Keep UID for proper object tracking
+						UID: pod.UID,
+					},
+					Spec: corev1.PodSpec{
+						// Only keep node name
+						NodeName: pod.Spec.NodeName,
+					},
+					Status: corev1.PodStatus{
+						// Only keep container statuses
+						InitContainerStatuses: trimContainerStatuses(
+							pod.Status.InitContainerStatuses,
+						),
+						ContainerStatuses: trimContainerStatuses(
+							pod.Status.ContainerStatuses,
+						),
+					},
+				}
+
+				return transformed, nil
+			})
+
 			//nolint:errcheck // AddEventHandler returns (registration, error) but error is always nil in client-go
 			c.podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 				AddFunc:    func(obj any) { c.handlePodAdd(ctx, obj) },
@@ -90,4 +127,25 @@ func NewCollector(factoryCtx *collector.FactoryContext) (collector.Collector, er
 	})
 
 	return c, nil
+}
+
+// trimContainerStatuses reduces memory by keeping only necessary container status fields
+func trimContainerStatuses(statuses []corev1.ContainerStatus) []corev1.ContainerStatus {
+	if len(statuses) == 0 {
+		return nil
+	}
+
+	trimmed := make([]corev1.ContainerStatus, len(statuses))
+	for i, cs := range statuses {
+		trimmed[i] = corev1.ContainerStatus{
+			Name:        cs.Name,
+			Image:       cs.Image,
+			ContainerID: cs.ContainerID,
+			State: corev1.ContainerState{
+				Waiting: cs.State.Waiting, // Keep full waiting state (reason, message)
+			},
+		}
+	}
+
+	return trimmed
 }
