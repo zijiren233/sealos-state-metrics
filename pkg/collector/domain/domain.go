@@ -18,10 +18,12 @@ type Collector struct {
 	checker *DomainChecker
 	logger  *log.Entry
 
-	mu  sync.RWMutex
-	ips map[string]*IPHealth // key: domain/ip
+	mu      sync.RWMutex
+	ips     map[string]*IPHealth     // key: domain/ip
+	domains map[string]*DomainHealth // key: domain
 
 	// Metrics
+	domainHealth       *prometheus.Desc
 	domainStatus       *prometheus.Desc
 	domainCertExpiry   *prometheus.Desc
 	domainResponseTime *prometheus.Desc
@@ -29,6 +31,12 @@ type Collector struct {
 
 // initMetrics initializes Prometheus metric descriptors
 func (c *Collector) initMetrics(namespace string) {
+	c.domainHealth = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "domain", "health"),
+		"Domain-level health metrics",
+		[]string{"domain", "type"},
+		nil,
+	)
 	c.domainStatus = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "domain", "status"),
 		"Domain IP status (1=ok, 0=error)",
@@ -49,6 +57,7 @@ func (c *Collector) initMetrics(namespace string) {
 	)
 
 	// Register descriptors
+	c.MustRegisterDesc(c.domainHealth)
 	c.MustRegisterDesc(c.domainStatus)
 	c.MustRegisterDesc(c.domainCertExpiry)
 	c.MustRegisterDesc(c.domainResponseTime)
@@ -73,8 +82,9 @@ func (c *Collector) Poll(ctx context.Context) error {
 
 	c.logger.WithField("count", len(c.config.Domains)).Info("Starting domain health checks")
 
-	// Create a new map to store all IP health results
+	// Create new maps to store results
 	newIPs := make(map[string]*IPHealth)
+	newDomains := make(map[string]*DomainHealth)
 
 	var mu sync.Mutex
 
@@ -82,11 +92,15 @@ func (c *Collector) Poll(ctx context.Context) error {
 	var wg sync.WaitGroup
 	for _, domain := range c.config.Domains {
 		wg.Go(func() {
-			ipHealths := c.checker.CheckIPs(ctx, domain, c.logger)
+			domainHealth, ipHealths := c.checker.CheckIPs(ctx, domain, c.logger)
 
-			// Add IP health results to new map
+			// Add results to new maps
 			mu.Lock()
 
+			// Store domain-level health
+			newDomains[domain] = domainHealth
+
+			// Store IP-level health
 			for _, ipHealth := range ipHealths {
 				key := ipKey(ipHealth.Domain, ipHealth.IP)
 				newIPs[key] = ipHealth
@@ -98,9 +112,10 @@ func (c *Collector) Poll(ctx context.Context) error {
 
 	wg.Wait()
 
-	// Atomically replace the old map with the new one
+	// Atomically replace the old maps with the new ones
 	c.mu.Lock()
 	c.ips = newIPs
+	c.domains = newDomains
 	c.mu.Unlock()
 
 	c.logger.WithField("count", len(c.config.Domains)).Info("Domain health checks completed")
@@ -134,6 +149,46 @@ func (c *Collector) collect(ch chan<- prometheus.Metric) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	// Emit domain-level health metrics
+	for _, domainHealth := range c.domains {
+		// Resolve status (1=success, 0=failure)
+		ch <- prometheus.MustNewConstMetric(
+			c.domainHealth,
+			prometheus.GaugeValue,
+			boolToFloat64(domainHealth.ResolveOk),
+			domainHealth.Domain,
+			"resolve",
+		)
+
+		// IP count
+		ch <- prometheus.MustNewConstMetric(
+			c.domainHealth,
+			prometheus.GaugeValue,
+			float64(domainHealth.IPCount),
+			domainHealth.Domain,
+			"ip_count",
+		)
+
+		// Healthy IPs count
+		ch <- prometheus.MustNewConstMetric(
+			c.domainHealth,
+			prometheus.GaugeValue,
+			float64(domainHealth.HealthyIPs),
+			domainHealth.Domain,
+			"healthy_ips",
+		)
+
+		// Unhealthy IPs count
+		ch <- prometheus.MustNewConstMetric(
+			c.domainHealth,
+			prometheus.GaugeValue,
+			float64(domainHealth.UnhealthyIPs),
+			domainHealth.Domain,
+			"unhealthy_ips",
+		)
+	}
+
+	// Emit IP-level metrics
 	for _, ipHealth := range c.ips {
 		// HTTP status
 		if c.config.IncludeHTTPCheck {

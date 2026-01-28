@@ -8,6 +8,16 @@ import (
 	"github.com/zijiren233/sealos-state-metric/pkg/util"
 )
 
+// DomainHealth represents the overall health status of a domain
+type DomainHealth struct {
+	Domain       string
+	ResolveOk    bool // Whether DNS resolution succeeded
+	IPCount      int  // Number of IPs resolved
+	HealthyIPs   int  // Number of healthy IPs (HTTP and/or Cert checks passed)
+	UnhealthyIPs int  // Number of unhealthy IPs
+	LastChecked  time.Time
+}
+
 // IPHealth represents the health status of a specific IP for a domain
 type IPHealth struct {
 	Domain string
@@ -53,8 +63,14 @@ func (dc *DomainChecker) CheckIPs(
 	ctx context.Context,
 	domain string,
 	logger *log.Entry,
-) []*IPHealth {
+) (*DomainHealth, []*IPHealth) {
 	now := time.Now()
+
+	domainHealth := &DomainHealth{
+		Domain:      domain,
+		ResolveOk:   true,
+		LastChecked: now,
+	}
 
 	// First, get the IPs for the domain
 	var ips []string
@@ -66,10 +82,48 @@ func (dc *DomainChecker) CheckIPs(
 				"error":  dnsResult.Error,
 			}).Warn("DNS resolution failed")
 
-			return nil
+			// Mark resolve as failed
+			domainHealth.ResolveOk = false
+			domainHealth.IPCount = 0
+			domainHealth.HealthyIPs = 0
+
+			// Return a health record indicating DNS failure
+			return domainHealth, []*IPHealth{
+				{
+					Domain:        domain,
+					IP:            "",
+					HTTPOk:        false,
+					HTTPError:     "DNS resolution failed: " + dnsResult.Error,
+					HTTPErrorType: dc.classifier.ClassifyHTTPError("DNS resolution failed"),
+					LastChecked:   now,
+				},
+			}
 		}
 
 		ips = dnsResult.IPs
+
+		// Check if IP list is empty
+		if len(ips) == 0 {
+			logger.WithFields(log.Fields{
+				"domain": domain,
+			}).Warn("DNS resolution returned no IPs")
+
+			// Mark as resolved but with 0 IPs
+			domainHealth.IPCount = 0
+			domainHealth.HealthyIPs = 0
+
+			// Return a health record indicating no IPs
+			return domainHealth, []*IPHealth{
+				{
+					Domain:        domain,
+					IP:            "",
+					HTTPOk:        false,
+					HTTPError:     "DNS resolution returned no IPs",
+					HTTPErrorType: dc.classifier.ClassifyHTTPError("no IPs resolved"),
+					LastChecked:   now,
+				},
+			}
+		}
 	}
 
 	// Get certificate info (shared across all IPs)
@@ -144,5 +198,28 @@ func (dc *DomainChecker) CheckIPs(
 		results = append(results, health)
 	}
 
-	return results
+	// Calculate domain-level health metrics
+	domainHealth.IPCount = len(ips)
+
+	healthyCount := 0
+	for _, health := range results {
+		// An IP is considered healthy if all enabled checks passed
+		isHealthy := true
+		if dc.checkHTTP && !health.HTTPOk {
+			isHealthy = false
+		}
+
+		if dc.checkCert && !health.CertOk {
+			isHealthy = false
+		}
+
+		if isHealthy {
+			healthyCount++
+		}
+	}
+
+	domainHealth.HealthyIPs = healthyCount
+	domainHealth.UnhealthyIPs = domainHealth.IPCount - healthyCount
+
+	return domainHealth, results
 }
